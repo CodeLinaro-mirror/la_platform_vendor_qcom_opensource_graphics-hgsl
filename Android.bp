@@ -1,0 +1,35 @@
+headers_src = [
+    "include/uapi/linux/*.h",
+]
+
+hgsl_headers_out = [
+    "linux/hgsl.h",
+]
+
+hgsl_kernel_headers_verbose = "--verbose "
+genrule {
+    name: "qti_generate_hgsl_headers",
+    tools: ["headers_install.sh",
+            "unifdef"
+    ],
+    tool_files: [
+         "hgsl_kernel_headers.py",
+    ],
+    srcs: headers_src,
+    cmd: "python3 -u $(location hgsl_kernel_headers.py) " +
+        hgsl_kernel_headers_verbose +
+        "--header_arch arm64 " +
+        "--gen_dir $(genDir) " +
+        "--hgsl_include_uapi $(locations include/uapi/linux/*.h) " +
+        "--unifdef $(location unifdef) " +
+        "--headers_install $(location headers_install.sh)",
+    out: hgsl_headers_out,
+}
+
+cc_library_headers {
+    name: "qti_hgsl_uapi",
+    generated_headers: ["qti_generate_hgsl_headers"],
+    export_generated_headers: ["qti_generate_hgsl_headers"],
+    vendor: true,
+    recovery_available: true
+}

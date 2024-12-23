@@ -1,0 +1,3 @@
+load(":build/hgsl_defs.bzl", "define_target_module")
+
+define_target_module("gen4_gvm")
