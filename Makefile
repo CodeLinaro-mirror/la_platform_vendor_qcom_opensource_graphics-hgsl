@@ -1,13 +1,17 @@
-# SPDX-License-Identifier: GPL-2.0-only
-qcom_hgsl-objs = hgsl.o \
-            hgsl_gmugos.o \
-            hgsl_hyp.o \
-            hgsl_hyp_socket.o \
-            hgsl_memory.o \
-            hgsl_sync.o
+ifeq ($(HGSL_MODULE_ROOT),)
+CUR_MKFILE = $(abspath $(lastword $(MAKEFILE_LIST)))
+HGSL_MODULE_ROOT = $(dir $(CUR_MKFILE))
+endif
 
-qcom_hgsl-$(CONFIG_SYSFS) += hgsl_sysfs.o
-qcom_hgsl-$(CONFIG_DEBUG_FS) += hgsl_debugfs.o
-qcom_hgsl-$(CONFIG_QCOM_HGSL_TCSR_SIGNAL) += hgsl_tcsr.o
+KBUILD_OPTIONS+=HGSL_PATH=$(HGSL_MODULE_ROOT)
 
-obj-$(CONFIG_QCOM_HGSL) += qcom_hgsl.o
+all: modules
+
+modules_install:
+	$(MAKE) INSTALL_MOD_STRIP=1 -C $(KERNEL_SRC) M=$(M) modules_install
+
+clean:
+	rm -f *.cmd *.d *.mod *.o *.ko *.mod.c *.mod.o Module.symvers modules.order
+
+%:
+	$(MAKE) -C $(KERNEL_SRC) M=$(M) $@ $(KBUILD_OPTIONS)

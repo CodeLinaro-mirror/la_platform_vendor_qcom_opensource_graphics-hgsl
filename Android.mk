@@ -1,10 +1,7 @@
 LOCAL_MODULE_DDK_BUILD := true
 LOCAL_MODULE_DDK_ALLOW_UNSAFE_HEADERS := true
 
-AUTO_GVM_TARGETS += $(CONFIG_ARCH_QTI_VM)
-AUTO_GVM_TARGETS += $(CONFIG_QTI_QUIN_GVM)
-
-ifneq (, $(filter y, $(AUTO_GVM_TARGETS)))
+ifeq ($(ENABLE_HYP),true)
 HGSL_SELECT := CONFIG_QCOM_HGSL=m
 
 LOCAL_PATH := $(call my-dir)
@@ -39,4 +36,4 @@ BOARD_VENDOR_KERNEL_MODULES += $(LOCAL_MODULE_PATH)/$(LOCAL_MODULE)
 include $(DLKM_DIR)/Build_external_kernelmodule.mk
 
 endif # DLKM check
-endif # ifneq (, $(filter y, $(AUTO_GVM_TARGETS)))
+endif # ENABLE_HYP
