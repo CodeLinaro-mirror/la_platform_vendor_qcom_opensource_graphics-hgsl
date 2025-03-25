@@ -1,7 +1,6 @@
-load("//build/kernel/kleaf:kernel.bzl", "ddk_module")
 load("//build/bazel_common_rules/dist:dist.bzl", "copy_to_dist_dir")
-
-print("Loading : hgsl_defs.bzl")
+load("//build/kernel/kleaf:kernel.bzl", "ddk_module")
+load(":build/target_variants.bzl", "get_all_la_variants")
 
 qcom_hgsl_includes = [
     "include/uapi/linux/hgsl.h",
@@ -24,33 +23,42 @@ def hgsl_get_srcs():
 def define_target_variant_module(target, variant):
     tv = "{}_{}".format(target, variant)
     rule_name = "{}_qcom_hgsl".format(tv)
-    kernel_build = "//msm-kernel:{}".format(tv)
-    defconfig = "config/{}_gpuconf".format(tv)
-    defconfig_hdr = "{}.h".format(defconfig)
+    kernel_build = select({
+        "//build/kernel/kleaf:socrepo_true": "//soc-repo:{}_base_kernel".format(tv),
+        "//build/kernel/kleaf:socrepo_false": "//msm-kernel:{}".format(tv),
+    })
+    ddk_deps = select({
+        "//build/kernel/kleaf:socrepo_true": [
+            "//soc-repo:all_headers",
+            "//soc-repo:{}/drivers/soc/qcom/hab/msm_hab".format(tv),
+            "//soc-repo:{}/drivers/soc/qcom/secure_buffer".format(tv),
+        ],
+        "//build/kernel/kleaf:socrepo_false": ["//msm-kernel:all_headers"],
+    })
+    defconfig = "config/{}_hgslconf".format(target)
 
     ddk_module(
         name = rule_name,
         out = "qcom_hgsl.ko",
-        srcs = hgsl_get_srcs() + [ defconfig_hdr ],
-        copts = [ "-include", defconfig_hdr ],
+        srcs = hgsl_get_srcs(),
+        copts = ["-Wno-format", "-Wno-incompatible-function-pointer-types"],
         defconfig = defconfig,
         kconfig = "Kconfig",
         conditional_srcs = {
-            "CONFIG_QCOM_HGSL_TCSR_SIGNAL": { True: [ "hgsl_tcsr.c" ] },
-            "CONFIG_SYSFS": { True: [ "hgsl_sysfs.c" ] },
-            "CONFIG_DEBUG_FS": { True: [ "hgsl_debugfs.c" ] },
+            "CONFIG_QCOM_HGSL_TCSR_SIGNAL": {True: ["hgsl_tcsr.c"]},
+            "CONFIG_SYSFS": {True: ["hgsl_sysfs.c"]},
+            "CONFIG_DEBUG_FS": {True: ["hgsl_debugfs.c"]},
         },
-        deps = [
-            "//msm-kernel:all_headers" ],
+        deps = ddk_deps,
         includes = ["include", "."],
         kernel_build = kernel_build,
-        visibility = ["//visibility:private"]
+        visibility = ["//visibility:private"],
     )
 
     copy_to_dist_dir(
         name = "{}_dist".format(rule_name),
-        data = [rule_name, "hgsl_kernel_headers"] + qcom_hgsl_includes,
-        dist_dir = "out/graphics-hgsl",
+        data = [rule_name],
+        dist_dir = "out/target/product/{}/dlkm/lib/modules/".format(target),
         flat = True,
         wipe_dist_dir = False,
         allow_duplicate_filenames = False,
@@ -58,13 +66,6 @@ def define_target_variant_module(target, variant):
         log = "info",
     )
 
-    genrule(
-    name = "copy_headers",
-    srcs = glob(["path/to/your/headers/*.h"]),
-    outs = ["hgsl_header_copied"],
-    cmd = "cp $(SRCS) /usr/include/linux/ && touch $@",
-    )
-
 def define_target_module(target):
-    define_target_variant_module(target, "gki")
-    define_target_variant_module(target, "consolidate")
+    for target, variant in get_all_la_variants():
+        define_target_variant_module(target, variant)

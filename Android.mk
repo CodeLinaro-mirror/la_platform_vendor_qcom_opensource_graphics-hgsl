@@ -1,7 +1,8 @@
+ifeq ($(ENABLE_HYP),true)
+
 LOCAL_MODULE_DDK_BUILD := true
 LOCAL_MODULE_DDK_ALLOW_UNSAFE_HEADERS := true
 
-ifeq ($(ENABLE_HYP),true)
 HGSL_SELECT := CONFIG_QCOM_HGSL=m
 
 LOCAL_PATH := $(call my-dir)
@@ -10,13 +11,17 @@ include $(CLEAR_VARS)
 # This makefile is only for DLKM
 ifneq ($(findstring vendor,$(LOCAL_PATH)),)
 
-DLKM_DIR   := device/qcom/common/dlkm
+ifeq ($(BOARD_COMMON_DIR),)
+    BOARD_COMMON_DIR := device/qcom/common
+endif
+
+DLKM_DIR := $(BOARD_COMMON_DIR)/dlkm
 
 KBUILD_OPTIONS += BOARD_PLATFORM=$(TARGET_BOARD_PLATFORM)
 KBUILD_OPTIONS += $(HGSL_SELECT)
 KBUILD_OPTIONS += MODNAME=qcom_hgsl
 
-LOCAL_CFLAGS := -Wno-unused-parameter -Wno-unused-variable 
+LOCAL_CFLAGS := -Wno-unused-parameter -Wno-unused-variable
 
 include $(CLEAR_VARS)
 LOCAL_EXPORT_C_INCLUDE_DIRS += $(LOCAL_PATH)/include

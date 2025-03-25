@@ -29,4 +29,3 @@ qcom_hgsl-y = hgsl.o \
 qcom_hgsl-$(CONFIG_QCOM_HGSL_TCSR_SIGNAL) += hgsl_tcsr.o
 qcom_hgsl-$(CONFIG_SYSFS) += hgsl_sysfs.o
 qcom_hgsl-$(CONFIG_DEBUG_FS) += hgsl_debugfs.o
-

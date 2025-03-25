@@ -3863,7 +3863,7 @@ static int qcom_hgsl_register(struct platform_device *pdev,
         return ret;
     }
 
-    hgsl_dev->driver_class = class_create(THIS_MODULE, HGSL_DEVICE_NAME);
+    hgsl_dev->driver_class = class_create(HGSL_DEVICE_NAME);
     if (IS_ERR(hgsl_dev->driver_class)) {
         ret = -ENOMEM;
         dev_err(&pdev->dev, "class_create failed %d\n", ret);
