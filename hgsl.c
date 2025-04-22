@@ -630,13 +630,14 @@ static int dbcq_send_msg(struct hgsl_priv  *priv,
     if (is_gmugos(ctxt->db_signal))
         hgsl_gmugos_irq_trigger(
             &hgsl->gmugos[dev_id],
-            dbcq->irq_idx);
-    if (is_global_db(ctxt->tcsr_idx))
+            dbcq->db_signal - HGSL_DB_SIGNAL_GMU_GOS_0,
+            dbcq->irq_bit_idx);
+    else if (is_global_db(ctxt->tcsr_idx))
         /* trigger TCSR interrupt for global doorbell */
-        tcsr_ring_global_db(hgsl, ctxt->tcsr_idx, dbcq->irq_idx);
+        tcsr_ring_global_db(hgsl, ctxt->tcsr_idx, dbcq->irq_bit_idx);
     else
         /* trigger GMU interrupt */
-        gmu_ring_local_db(hgsl, dbcq->irq_idx);
+        gmu_ring_local_db(hgsl, dbcq->irq_bit_idx);
 
 quit:
 
@@ -936,7 +937,7 @@ static int hgsl_init_db_signal(struct qcom_hgsl *hgsl, int tcsr_idx)
 
 static void hgsl_dbcq_init(struct hgsl_priv *priv,
     struct hgsl_context *ctxt, uint32_t db_signal,
-    uint32_t gmuaddr, uint32_t irq_idx)
+    uint32_t gmuaddr, uint32_t irq_bit_idx)
 {
     struct qcom_hgsl *hgsl = priv->dev;
     struct doorbell_context_queue *dbcq = NULL;
@@ -946,9 +947,9 @@ static void hgsl_dbcq_init(struct hgsl_priv *priv,
     if ((db_signal <= HGSL_DB_SIGNAL_NONE) ||
         (db_signal > HGSL_DB_SIGNAL_MAX) ||
         (gmuaddr == 0) ||
-        (irq_idx == GLB_DB_DEST_TS_RETIRE_IRQ_ID)) {
+        (irq_bit_idx == GLB_DB_DEST_TS_RETIRE_IRQ_ID)) {
         LOGE("Invalid db signal %d or queue buffer 0x%x\n or irq_idx %d",
-            db_signal, gmuaddr, irq_idx);
+            db_signal, gmuaddr, irq_bit_idx);
         goto err;
     }
 
@@ -959,7 +960,8 @@ static void hgsl_dbcq_init(struct hgsl_priv *priv,
     }
 
     if (is_gmugos(db_signal))
-        ret = hgsl_init_gmugos(to_platform_device(hgsl->dev), ctxt, irq_idx);
+        ret = hgsl_init_gmugos(to_platform_device(hgsl->dev),
+                ctxt, db_signal - HGSL_DB_SIGNAL_GMU_GOS_0);
     else {
         tcsr_idx = db_signal - DB_SIGNAL_GLOBAL_0;
         ret = hgsl_init_db_signal(hgsl, tcsr_idx);
@@ -969,7 +971,7 @@ static void hgsl_dbcq_init(struct hgsl_priv *priv,
         goto err;
     }
     dbcq->db_signal = db_signal;
-    dbcq->irq_idx = irq_idx;
+    dbcq->irq_bit_idx = irq_bit_idx;
     dbcq->queue_header_gmuaddr = gmuaddr;
     dbcq->queue_body_gmuaddr = dbcq->queue_header_gmuaddr + HGSL_CTXT_QUEUE_BODY_OFFSET;
     dbcq->indirect_ibs_gmuaddr =
@@ -1422,19 +1424,26 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 {
     int ret = 0;
     int rval = 0;
+    unsigned int retry_count = 5;
 
     ret = hgsl_hyp_init(&hgsl->global_hyp, hgsl->dev, 0, "hgsl");
     if (ret != 0)
         goto out;
 
-    ret = hgsl_hyp_gsl_lib_open(&hgsl->global_hyp, 0, &rval);
+    /* Retry to communicate with BE here */
+    do {
+        ret = hgsl_hyp_gsl_lib_open(&hgsl->global_hyp, 0, &rval);
+    } while (ret == -EAGAIN && retry_count--);
     if (rval)
         ret = -EINVAL;
     else
         hgsl->global_hyp_inited = true;
 out:
-    if (ret)
+    if (ret) {
+        LOGE("Failed to open gsl lib ret: %d retry_count: %u\n",
+                ret, retry_count);
         hgsl_hyp_close(&hgsl->global_hyp);
+    }
 
     return ret;
 }
@@ -1912,14 +1921,14 @@ static int hgsl_ctxt_create_dbq(struct hgsl_priv *priv,
     uint32_t dbq_idx;
     uint32_t db_signal;
     uint32_t queue_gmuaddr;
-    uint32_t irq_idx;
+    uint32_t irq_bit_idx;
     int ret;
 
     /* if backend can support the latest context dbq, then use dbcq */
     ret = hgsl_hyp_query_dbcq(hab_channel, ctxt->devhandle, ctxt->context_id,
-        HGSL_CTXT_QUEUE_TOTAL_SIZE, &db_signal, &queue_gmuaddr, &irq_idx);
+        HGSL_CTXT_QUEUE_TOTAL_SIZE, &db_signal, &queue_gmuaddr, &irq_bit_idx);
     if (!ret) {
-        hgsl_dbcq_init(priv, ctxt, db_signal, queue_gmuaddr, irq_idx);
+        hgsl_dbcq_init(priv, ctxt, db_signal, queue_gmuaddr, irq_bit_idx);
         return 0;
     }
 
@@ -3342,28 +3351,23 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 {
     struct hgsl_mem_node *node_found = NULL;
     struct rb_node *next = NULL;
-    int ret;
+    int ret = 0;
     struct hgsl_hab_channel_t *hab_channel = NULL;
 
-    if (!hgsl_mem_rb_empty(priv)) {
-        ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
-        if (ret)
-            LOGE("Failed to get channel %d", ret);
+    if (hgsl_mem_rb_empty(priv))
+        goto out;
 
-        ret = hgsl_hyp_notify_cleanup(hab_channel, HGSL_CLEANUP_WAIT_SLICE_IN_MS);
-        if (ret == -ETIMEDOUT) {
-            hgsl_hyp_channel_pool_put(hab_channel);
-            return ret;
-        }
+    ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
+    if (ret) {
+        LOGE("Failed to get channel %d", ret);
+        goto out;
     }
+
+    ret = hgsl_hyp_notify_cleanup(hab_channel, HGSL_CLEANUP_WAIT_SLICE_IN_MS);
+    if (ret == -ETIMEDOUT)
+        goto out;
 
     mutex_lock(&priv->lock);
-    if (!hab_channel && !hgsl_mem_rb_empty(priv)) {
-        ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
-        if (ret)
-            LOGE("Failed to get channel %d", ret);
-    }
-
     next = rb_first(&priv->mem_mapped);
     while (next) {
         node_found = rb_entry(next, struct hgsl_mem_node, mem_rb_node);
@@ -3395,8 +3399,9 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
     }
     mutex_unlock(&priv->lock);
 
+out:
     hgsl_hyp_channel_pool_put(hab_channel);
-    return 0;
+    return ret;
 }
 
 static int _hgsl_release(struct hgsl_priv *priv)
