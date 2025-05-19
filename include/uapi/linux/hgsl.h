@@ -838,4 +838,32 @@ struct hgsl_ioctl_activate_device_params {
 #define HGSL_IOCTL_ACTIVATE_DEVICE \
 				HGSL_IOW(0x07, struct hgsl_ioctl_activate_device_params)
 
+/**
+ * struct hgsl_ioctl_gslprofiler_per_proc_gpu_busy_params - query per process gpu busy percentage
+ * @busy: The pointer to the data of per process gpu busy percentage
+ * @sampling_time: The sample interval of GPU per-process busy stats calculation in MS
+ * @channel_id: hab channel id
+ */
+struct hgsl_ioctl_gslprofiler_per_proc_gpu_busy_params {
+	__u64 busy;
+	__u32 sampling_time;
+	__u32 channel_id;
+};
+
+#define HGSL_IOCTL_GSLPROFILER_PER_PROC_GPU_BUSY \
+		HGSL_IOW(0x40,  struct hgsl_ioctl_gslprofiler_per_proc_gpu_busy_params)
+
+/**
+ * struct hgsl_ioctl_gslprofiler_per_proc_gpu_pmem_params - query per process gpu pmem usage
+ * @pmem: The pointer to the data of per process gpu pmem usage
+ * @channel_id: hab channel id
+ */
+struct hgsl_ioctl_gslprofiler_per_proc_gpu_pmem_params {
+	__u64 pmem;
+	__u32 channel_id;
+};
+
+#define HGSL_IOCTL_GSLPROFILER_PER_PROC_GPU_PMEM \
+		HGSL_IOW(0x41,  struct hgsl_ioctl_gslprofiler_per_proc_gpu_pmem_params)
+
 #endif /* _UAPI_MSM_HGSL_H */
