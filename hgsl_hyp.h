@@ -74,6 +74,12 @@
 
 #define RPC_CLIENT_NAME_SIZE (64)
 
+#define USER_TS_BUFFER_SIZE_IN_BYTES (PAGE_SIZE)
+#define OFFSETOF_IPCQ_HEADER_ELEM(elem)  offsetof(struct HfiQueueHeader, elem)
+#define OFFSET_OF_TYPE_ELEM(type, elem)  offsetof(type, elem)
+#define MAX_HFI_MSG_SIZE                 (0xFF)
+#define HGSL_PER_CTXT_MAX_IB_NUM         (2)
+
 struct hgsl_context;
 struct hgsl_priv;
 struct qcom_hgsl;
@@ -168,6 +174,7 @@ enum gsl_rpc_func_t {
 	RPC_DEVICE_GETFEATURES,
 	RPC_DEVICE_ACTIVATE,
 	RPC_GVM_INIT,
+	RPC_GVM_DEINIT,
 	RPC_FUNC_LAST /* insert new func BEFORE this line! */
 };
 
@@ -204,6 +211,12 @@ enum gsl_rpc_server_mode_t {
 	GSL_RPC_SERVER_MODE_2,
 	GSL_RPC_SERVER_MODE_3,
 	GSL_RPC_SERVER_MODE_LAST
+};
+
+/* frontend i.e. msg type send to be */
+enum hgsl_ipcq_msg_id_t {
+	GSL_IPCQ_SNAPSHOT_DUMP = 1,
+	GSL_IPCQ_INVALID
 };
 
 #pragma pack(push, 4)
@@ -475,70 +488,62 @@ struct device_activate_params {
 	uint32_t                size;
 	uint32_t                devhandle;
 };
-
 struct hgsl_init_param_t {
 	/* All size and offset values are in dword */
 	uint32_t size;
 	/* device handle identifier */
 	uint32_t devhandle;
-	/* Buffer shared between rgs and hgsl for two queues. */
+	/* buffer shared between rgs and hgsl for two queues. */
 	uint32_t pkmd_export_id;
 	/* overall size of the queue buffer */
 	uint32_t pkmd_dwsize;
-	/*
-	 * Offset from the base address of the buffer,
-	 * it is also the start address of the queue header
-	 */
+	/* the start address of the queue header */
 	uint32_t PKMD2HGSL_queue_offset;
-	/* List supported hgsl features */
+	/* list supported hgsl features */
 	uint32_t feature_flags;
-	/* Ring buffer offset from queue base address */
+	/* ring buffer offset from queue base address */
 	uint32_t PKMD2HGSL_rb_offset;
 
-	/* Buffer shared between gmu and hgsl - only this buffer will be mapped to GMU */
+	/* buffer shared between gmu and hgsl - only this buffer will be mapped to GMU */
 	uint32_t gmu_export_id;
-	/*
-	 * Overall size of gmu ipcq buffer which should include the gmu2hgsl
-	 * and hgsl2gmu and maybe some other memory
-	 */
+	/* size of above buffer */
 	uint32_t gmu_dwsize;
-	/*
-	 * Offset from the base address of the buffer,
-	 * it is also the start address of the queue header
-	 */
+	/* the start address of the queue header */
 	uint32_t GMU2HGSL_queue_offset;
-	/* Size of the struct HfiQueueHeader + size of the queue ring buffer */
+	/* size of the struct HfiQueueHeader + size of the queue ring buffer */
 	uint32_t GMU2HGSL_queue_size;
 	/* ring buffer offset from queue base address */
 	uint32_t GMU2HGSL_rb_offset;
-	/*
-	 * Offset from the base address of the buffer,
-	 * it is also the start address of the queue header
-	 */
+	/* the start address of the queue header */
 	uint32_t HGSL2GMU_queue_offset;
-	/* Size of the struct HfiQueueHeader + size of the queue ring buffer */
+	/* size of the struct HfiQueueHeader + size of the queue ring buffer */
 	uint32_t HGSL2GMU_queue_size;
-	/* Ring buffer offset from queue base address */
+	/* ring buffer offset from queue base address */
 	uint32_t HGSL2GMU_rb_offset;
 };
 
+struct hgsl_deinit_param_t {
+	uint32_t size;
+	uint32_t devhandle;
+};
+
 struct hgsl_gvm_settings {
-	/* FV bit: 1 */
+	/* fv bit: 1 */
 	uint32_t enabled_feature_mask;
-	/* SID for this gvm */
+	/* sid for this gvm */
 	uint32_t sid;
-	/* Stage 1 context bank index for this gvm */
+	/* stage 1 context bank index for this gvm */
 	uint32_t cb;
 	/* irq index for the GMU2GOS/GOS2GMU irq */
 	uint32_t irq_index;
-	/* The irq bit used to notice new hfi cmd in PKMD2HGSL queue */
+	/* the irq bit used to notice new hfi cmd in PKMD2HGSL queue */
 	uint32_t irq_bit_pkmd_hfi;
-	/* Context record buffer size in KB */
+	/*  context record buffer size in kb */
 	uint32_t ctxt_rec_buf_size_KB;
-	/* TODO: add more parameters needed for hw fence */
-	/* GMU virtual addr for the buffer used for hfi cmd/msg queue between hgsl and gmu */
+	/* add more parameters needed for hw fence */
+	/* gmu virtual addr for the buffer used for hfi cmd/msg queue between hgsl and gmu */
 	uint32_t gmu_addr;
-	/* The irq bit used to notice new hfi cmd in above gmu2hgsl hfi queue */
+	/* the irq bit used to notice new hfi cmd in above gmu2hgsl hfi queue */
 	uint32_t irq_bit_gmu_hfi;
 	/* device handle identifier */
 	uint32_t device_id;
@@ -548,6 +553,59 @@ struct hgsl_gvm_settings {
 	uint32_t va_end;
 	/* sync irq shift value */
 	uint32_t sync_irq_shift;
+};
+
+struct HfiQueueHeader {
+	/* The Queue status.0x01 : Queue is active.0x00 : Queue is inactive. */
+	uint32_t status;
+	/* The Queue start address in GMU VA space. 4 byte-aligned */
+	uint32_t startAddr;
+	/* Types, see macro mask above to access each type */
+	/* including fieds: HFI_MASK_QHDR_RX_TYPE, HFI_MASK_QHDR_TX_TYPE, HFI_MASK_QHDR_PRI_TYPE */
+	/* and HFI_MASK_QHDR_Q_ID_TYPE */
+	uint32_t type;
+	/* Size of the Queue. */
+	uint32_t dwSize;
+	/* Size of the Queue packet entries, in dwords. */
+	/* A value of 0 indicates variable packet sizes. */
+	uint32_t pktSize;
+	/* number of packets that were dropped by the sender */
+	uint32_t pktDropCnt;
+	/* not used, make it padding until there's something we want */
+	uint32_t pad1;
+	uint32_t pad2;
+	uint32_t pad3;
+	uint32_t pad4;
+	/* Read index in dwords, which starts with a value of 0
+	 *and wraps around after QHDR_Q_SIZE - 1
+	 */
+	uint32_t readIdx;
+	/* Write index in dwords, which starts with a value of 0 */
+	/* and wraps around after QHDR_Q_SIZE - 1  */
+	uint32_t writeIdx;
+};
+
+struct HfiMsgHeader_t {
+	uint32_t msg_id             : 8;  /* see hgsl_ipcq_msg_id_t */
+	uint32_t msg_size_dword     : 8;  /* unit in dword, maximum 255 */
+	uint32_t msg_type           : 4;
+	uint32_t msg_packet_seq_no  : 12;
+};
+
+struct hgsl_ipcq_data_t {
+	// size all in dw
+	struct HfiQueueHeader   header;
+	int                     is_allocated;
+	uintptr_t               baseaddr;
+};
+
+struct hgsl_ipcq_gvm_state_dump_msg {
+	struct HfiMsgHeader_t header;
+	uint32_t              ib_num;
+	uint64_t              gpuaddr[HGSL_PER_CTXT_MAX_IB_NUM];
+	uint32_t              size_dw[HGSL_PER_CTXT_MAX_IB_NUM];
+	uint32_t              ctxt_id;
+	uint32_t              ts;  // Per-context user space gsl timestamp of the fault command
 };
 
 #pragma pack(pop)
@@ -576,10 +634,6 @@ struct hgsl_dbq_info {
 	uint32_t ibdesc_max_size;
 	struct hgsl_hab_channel_t *hab_channel;
 };
-
-int hgsl_hyp_query_gvm_setting(struct hgsl_hyp_priv_t *priv,
-		struct hgsl_init_param_t *ptr_ipcq_settings,
-		struct hgsl_gvm_settings *ptr_gvm_settings);
 
 int hgsl_hyp_init(struct hgsl_hyp_priv_t *priv, struct device *dev,
 	int client_pid, const char * const client_name);
@@ -692,6 +746,10 @@ int hgsl_hyp_query_dbcq(struct hgsl_hab_channel_t *hab_channel, uint32_t devhand
 int hgsl_hyp_context_register_dbcq(struct hgsl_hab_channel_t *hab_channel,
 	uint32_t devhandle, uint32_t ctxthandle, struct dma_buf *dma_buf, uint32_t size,
 	uint32_t queue_body_offset, uint32_t *export_id);
+
+int hgsl_hyp_export_ipc_queue(struct qcom_hgsl *hgsl, int device_id);
+
+void hgsl_hyp_deinit_ipcq(struct qcom_hgsl *hgsl, int dev_idx);
 
 int hgsl_hyp_ctxt_create_v1(struct device *dev,
 	struct hgsl_priv *priv,

@@ -82,10 +82,6 @@
 // Skip all commands from the bad context
 #define HGSL_FT_POLICY_FLAG_KILL        BIT(2)
 
-#define ALIGN_ADDRESS_4DWORD(addr)      (((addr)+15) & ((long long) ~15))
-#define ALIGN_DWORD_ADDRESS_4DWORD(dwaddr) (ALIGN_ADDRESS_4DWORD((dwaddr) * \
-                sizeof(uint32_t)) / sizeof(uint32_t))
-
 enum HGSL_DBQ_METADATA_COMMAND_INFO {
 	HGSL_DBQ_METADATA_CONTEXT_INFO,
 	HGSL_DBQ_METADATA_QUEUE_INDEX,
@@ -974,7 +970,8 @@ static void hgsl_dbcq_init(struct hgsl_priv *priv,
 
 	if (is_gmugos(db_signal))
 		ret = hgsl_init_gmugos(to_platform_device(hgsl->dev),
-				ctxt, db_signal - HGSL_DB_SIGNAL_GMU_GOS_0);
+				ctxt->devhandle, db_signal - HGSL_DB_SIGNAL_GMU_GOS_0,
+				GMUGOS_IRQ_MASK);
 	else {
 		tcsr_idx = db_signal - DB_SIGNAL_GLOBAL_0;
 		ret = hgsl_init_db_signal(hgsl, tcsr_idx);
@@ -1100,12 +1097,205 @@ err:
 	ret = -EPERM;
 out:
 	hgsl_hyp_channel_pool_put(hab_channel);
-
-	LOGD("%d", ret);
 	return ret;
 }
 
-static int hgsl_dbcq_issue_cmd(struct hgsl_priv *priv,
+static void hgsl_free_per_device_ipc_queues(struct qcom_hgsl *hgsl, uint32_t dev_idx,
+	int irq_idx)
+{
+	struct hgsl_mem_node *mem_node = NULL;
+	struct iosys_map *vmap = NULL;
+
+	if (dev_idx >= HGSL_DEVICE_NUM) {
+		LOGE("invalid dev idx 0x%x", dev_idx);
+		return;
+	}
+
+	if (irq_idx < 0 || irq_idx >= HGSL_IPCQ_NUM) {
+		LOGE("invalid irq idx 0x%d", irq_idx);
+		return;
+	}
+
+	vmap = &(hgsl->ipcq_memnode_vmap[dev_idx][irq_idx]);
+	mem_node = hgsl->ipcq_memnode[dev_idx][irq_idx];
+	if (!mem_node)
+		return;
+
+	if (mem_node->dma_buf) {
+		dma_buf_vunmap_unlocked(mem_node->dma_buf, vmap);
+		dma_buf_end_cpu_access(mem_node->dma_buf, DMA_BIDIRECTIONAL);
+		memset(vmap, 0, sizeof(struct iosys_map));
+	}
+
+	hgsl_sharedmem_free(mem_node);
+	hgsl->ipcq_memnode[dev_idx][irq_idx] = NULL;
+}
+
+static int hgsl_init_ipcq_memnode(struct qcom_hgsl *hgsl, int allocate_size,
+	int dev_idx, int q_type)
+{
+	int ret = 0;
+	struct hgsl_mem_node *node = hgsl_mem_node_zalloc(hgsl->cache_flags);
+
+	if (!node) {
+		LOGE("failed to allocate ipcq memory node");
+		ret = ENOMEM;
+		goto out;
+	}
+
+	if ((q_type >= HGSL_IPCQ_NUM) || (q_type < 0) ||
+		(dev_idx < 0 || dev_idx >= HGSL_DEVICE_NUM)) {
+		LOGE("Invalid ipcq type %d or invalid device idx %d", q_type, dev_idx);
+		ret = -EINVAL;
+		goto err;
+	}
+
+	node->flags = GSL_MEMFLAGS_ALIGN4K;
+	ret = hgsl_sharedmem_alloc(hgsl->dev, allocate_size,
+		node->flags, node);
+	if (ret) {
+		LOGE("Failed to allocate memory for node buffer\n");
+		goto err;
+	}
+
+	dma_buf_begin_cpu_access(node->dma_buf, DMA_BIDIRECTIONAL);
+	ret = dma_buf_vmap_unlocked(node->dma_buf, &(hgsl->ipcq_memnode_vmap[dev_idx][q_type]));
+	if (ret) {
+		LOGE("failed to map node buffer");
+		goto err;
+	}
+
+	hgsl->ipcq_memnode[dev_idx][q_type] = node;
+	goto out;
+
+err:
+	if (node) {
+		if (node->dma_buf) {
+			dma_buf_vunmap_unlocked(node->dma_buf,
+				&(hgsl->ipcq_memnode_vmap[dev_idx][q_type]));
+			dma_buf_end_cpu_access(node->dma_buf, DMA_BIDIRECTIONAL);
+			memset(&(hgsl->ipcq_memnode_vmap[dev_idx][q_type]),
+				0, sizeof(struct iosys_map));
+		}
+
+		hgsl_sharedmem_free(node);
+	}
+
+out:
+	return ret;
+}
+
+static int hgsl_allocate_per_device_ipc_queues(struct qcom_hgsl *hgsl, uint32_t dev_idx)
+{
+	int ret = 0;
+	struct HfiQueueHeader qheader = {0};
+	struct hgsl_init_param_t *settings = &(hgsl->ipcq_settings[dev_idx]);
+
+	ret = hgsl_init_ipcq_memnode(hgsl, settings->pkmd_dwsize
+		* sizeof(uint32_t), dev_idx, HGSL_IPCQ_RGS_IDX);
+	if (ret) {
+		LOGE("failed to init pkmd memory node with ret = %d", ret);
+		goto out;
+	}
+
+	hgsl->ipcq_datas[dev_idx][HGSL_IPCQ_RGS_IDX].is_allocated = GSL_TRUE;
+	ret = hgsl_init_ipcq_memnode(hgsl, settings->gmu_dwsize
+		* sizeof(uint32_t), dev_idx, HGSL_IPCQ_GMU_IDX);
+	if (ret) {
+		LOGE("failed to init gmu memory node with ret = %d", ret);
+		goto err;
+	}
+
+	/* initialize the pkmd2hgsl ipcq */
+	settings->PKMD2HGSL_rb_offset = HGSL_HFI_QUEUE_HEADER_SIZE_IN_DWORD;
+	qheader.dwSize = ALIGN_DWORD_ADDRESS_4DWORD(HGSL_HFI_PKMD2HGSL_QUEUE_RBSIZE_IN_DWORD);
+	qheader.status = GSL_TRUE;
+	memcpy(&(hgsl->ipcq_datas[dev_idx][HGSL_IPCQ_RGS_IDX].header), &qheader,
+		sizeof(struct HfiQueueHeader));
+	hgsl->ipcq_datas[dev_idx][HGSL_IPCQ_RGS_IDX].baseaddr =
+		(uintptr_t)hgsl->ipcq_memnode_vmap[dev_idx][HGSL_IPCQ_RGS_IDX].vaddr;
+	memcpy((void *)((char *)hgsl->ipcq_memnode_vmap[dev_idx][HGSL_IPCQ_RGS_IDX].vaddr +
+		settings->PKMD2HGSL_queue_offset * sizeof(uint32_t)), (void *)&qheader,
+		sizeof(struct HfiQueueHeader));
+
+	/* initialize the gmu2hgsl ipcq */
+	settings->GMU2HGSL_rb_offset = HGSL_HFI_QUEUE_HEADER_SIZE_IN_DWORD;
+	qheader.dwSize = ALIGN_DWORD_ADDRESS_4DWORD(HGSL_HFI_GMU2HGSL_QUEUE_RBSIZE_IN_DWORD);
+	qheader.status = GSL_TRUE;
+	memcpy((void *)((char *)hgsl->ipcq_memnode_vmap[dev_idx][HGSL_IPCQ_GMU_IDX].vaddr +
+		settings->GMU2HGSL_queue_offset * sizeof(uint32_t)),
+		(void *)&qheader, sizeof(struct HfiQueueHeader));
+
+	/* initialize the hgsl2gmu ipcq */
+	settings->HGSL2GMU_rb_offset = settings->GMU2HGSL_rb_offset +
+		ALIGN_DWORD_ADDRESS_4DWORD(HGSL_HFI_GMU2HGSL_QUEUE_RBSIZE_IN_DWORD) +
+		HGSL_HFI_QUEUE_HEADER_SIZE_IN_DWORD;
+	qheader.dwSize = ALIGN_DWORD_ADDRESS_4DWORD(HGSL_HFI_HGSL2GMU_QUEUE_RBSIZE_IN_DWORD);
+	qheader.status = GSL_TRUE;
+	memcpy((void *)((char *)hgsl->ipcq_memnode_vmap[dev_idx][HGSL_IPCQ_GMU_IDX].vaddr +
+		settings->HGSL2GMU_queue_offset * sizeof(uint32_t)),
+		(void *)&qheader, sizeof(struct HfiQueueHeader));
+	wmb(); // Ensure the write completes before any further memory operations
+
+	ret = hgsl_hyp_export_ipc_queue(hgsl, dev_idx);
+	if (ret) {
+		LOGE("Failed to export ipcq %d\n", ret);
+		goto err;
+	}
+
+	goto out;
+err:
+	hgsl_free_per_device_ipc_queues(hgsl, dev_idx, HGSL_IPCQ_GMU_IDX);
+	hgsl_free_per_device_ipc_queues(hgsl, dev_idx, HGSL_IPCQ_RGS_IDX);
+out:
+	return ret;
+}
+
+/************************************************************************************************/
+static int hgsl_allocate_ipc_queues(struct qcom_hgsl *hgsl, uint32_t dev_idx)
+{
+	int ret = 0;
+	struct hgsl_init_param_t *settings = &(hgsl->ipcq_settings[dev_idx]);
+
+	settings->size = sizeof(struct hgsl_init_param_t);
+	settings->pkmd_dwsize =
+		HGSL_HFI_PKMD_QUEUE_TOTAL_SIZE_IN_BYTES / sizeof(uint32_t);
+	settings->PKMD2HGSL_queue_offset = 0;
+
+	settings->gmu_dwsize =
+		HGSL_HFI_GMU_QUEUE_TOTAL_SIZE_IN_BYTES / sizeof(uint32_t);
+	// leave 1 dw space between the queues
+	settings->GMU2HGSL_queue_offset = 0;
+	settings->GMU2HGSL_queue_size = HGSL_HFI_GMU2HGSL_QUEUE_RBSIZE_IN_DWORD;
+	// leave 1 dw space between the queues
+	settings->HGSL2GMU_queue_offset =
+		settings->GMU2HGSL_queue_offset
+		+ HGSL_HFI_GMU2HGSL_QUEUE_RBSIZE_IN_DWORD + 1;
+	settings->HGSL2GMU_queue_size = HGSL_HFI_HGSL2GMU_QUEUE_RBSIZE_IN_DWORD;
+
+	switch (dev_idx) {
+	case HGSL_DEVICE_IDX_0:
+	case HGSL_DEVICE_IDX_1:
+		settings->devhandle = hgsl->device_handle[dev_idx];
+		break;
+	default:
+		LOGE("Invalid device idx provided %d", dev_idx);
+		settings->devhandle = GSL_HANDLE_NULL;
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = hgsl_allocate_per_device_ipc_queues(hgsl, dev_idx);
+	if (ret) {
+		LOGE("failed to alloc ipc queues for dev %d, ret %d", dev_idx, ret);
+	}
+
+out:
+	return ret;
+}
+
+/*********************************************************************************************/
+static int hgsl_dbcq_issue_cmd(struct hgsl_priv  *priv,
 			struct hgsl_context *ctxt, uint32_t num_ibs,
 			uint32_t gmu_cmd_flags,
 			uint32_t *timestamp,
@@ -1466,31 +1656,29 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 		device_id = (dev_hnd == GSL_HANDLE_DEV0) ? GSL_DEVICE_0 : GSL_DEVICE_1;
 		gpu_id = hgsl_hnd2id(dev_hnd);
 
-		if (hgsl->fv_on) {
-			LOGD("hgsl_hyp_device_open for device id %d", device_id);
-			ret[gpu_id] = hgsl_hyp_device_open(&hgsl->global_hyp, 0,
-							device_id, &rval);
-			if (ret[gpu_id]) {
-				LOGE("hgsl_hyp_device_open() failed for %s with ret %d",
-						((dev_hnd == GSL_HANDLE_DEV0) ? "GSL_HANDLE_DEV0" :
-								"GSL_HANDLE_DEV1"), ret[gpu_id]);
+		LOGD("hgsl_hyp_device_open for device id %d", device_id);
+		ret[gpu_id] = hgsl_hyp_device_open(&hgsl->global_hyp, 0,
+						device_id, &rval);
+		if (ret[gpu_id]) {
+			LOGE("hgsl_hyp_device_open() failed for %s with ret %d",
+					((dev_hnd == GSL_HANDLE_DEV0) ? "GSL_HANDLE_DEV0" :
+							"GSL_HANDLE_DEV1"), ret[gpu_id]);
+			ret_val = -EINVAL;
+			continue;
+		} else {
+			/*
+				* Device handle returned by BE should be according to
+				* passed device id for other values consider it as error.
+				*/
+			if (dev_hnd != rval) {
+				LOGE("Inval dev_handle from BE rval=%d dev_id %d",
+						rval, device_id);
 				ret_val = -EINVAL;
 				continue;
 			} else {
-				/*
-				 * Device handle returned by BE should be according to
-				 * passed device id for other values consider it as error.
-				 */
-				if (dev_hnd != rval) {
-					LOGE("Inval dev_handle from BE rval=%d dev_id %d",
-							rval, device_id);
-					ret_val = -EINVAL;
-					continue;
-				} else {
-					LOGD("Dev_handle from BE %d dev_id %d",
-							rval, device_id);
-					hgsl->device_handle[gpu_id] = rval;
-				}
+				LOGD("Dev_handle from BE %d dev_id %d",
+						rval, device_id);
+				hgsl->device_handle[gpu_id] = rval;
 			}
 		}
 	}
@@ -4812,7 +5000,7 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 {
 	struct qcom_hgsl *hgsl_dev;
 	int ret;
-	int i;
+	int i, j;
 	struct component_match *match = NULL;
 	struct device_node *node = NULL;
 
@@ -4873,9 +5061,6 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 	}
 
 	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
-		hgsl_dev->ipcq_settings[i].devhandle = GSL_HANDLE_DEV0 + i;
-		hgsl_dev->ipcq_settings[i].size = sizeof(struct hgsl_init_param_t);
-		hgsl_dev->ipcq_settings[i].feature_flags = 0; // Reset feature flags
 		/*
 		 * The "fv_on" DT property indicates full virtualization
 		 * is enabled and if its not present then do not enable FV on BE for that GVM.
@@ -4883,17 +5068,17 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 		if (hgsl_dev->fv_on)
 			hgsl_dev->ipcq_settings[i].feature_flags |= HGSL_FEATURE_MASK_FV;
 
-		ret = hgsl_hyp_query_gvm_setting(&(hgsl_dev->global_hyp),
-				&(hgsl_dev->ipcq_settings[i]), &(hgsl_dev->gvm_settings[i]));
+		ret = hgsl_allocate_ipc_queues(hgsl_dev, i);
 		if (ret) {
-			LOGE("FAILED to query gvm info from backend for device %d", i);
+			LOGE("error in hgsl_allocate_ipc_queues %d", ret);
+			hgsl_hyp_deinit_ipcq(hgsl_dev, i);
 			continue;
 		}
 
-		LOGI("gvm settings dev_num %d mask 0x%x, sid %d, cb %d",
+		LOGD("gvm settings dev_num %d mask 0x%x, sid %d, cb %d",
 				i, hgsl_dev->gvm_settings[i].enabled_feature_mask,
 				hgsl_dev->gvm_settings[i].sid, hgsl_dev->gvm_settings[i].cb);
-		LOGI("irq_index %d, irq_bit_pkmd_hfi %d",
+		LOGD("irq_index %d, irq_bit_pkmd_hfi %d",
 				hgsl_dev->gvm_settings[i].irq_index,
 				hgsl_dev->gvm_settings[i].irq_bit_pkmd_hfi);
 
@@ -4907,14 +5092,21 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 			else
 				LOGI("GPU FV is enabled by backend for GPU %d", i);
 		}
-
 	}
+
 
 	hgsl_dev->cache_flags.default_iocoherency = of_property_read_bool(pdev->dev.of_node,
 							"default_iocoherency");
 	hgsl_dev->cache_flags.writecombine_enable = of_property_read_bool(pdev->dev.of_node,
 							"writecombine_enable");
 	platform_set_drvdata(pdev, hgsl_dev);
+
+	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
+		ret = hgsl_init_gmugos(pdev, hgsl_dev->device_handle[i],
+			hgsl_dev->irq_index - HGSL_DB_SIGNAL_GMU_GOS_0, RGSGOS_IRQ_MASK);
+		if (ret)
+			LOGE("hgsl_init_gmugos %d failed irq index 0x%x", i, hgsl_dev->irq_index);
+	}
 
 	if (hgsl_dev->fv_on) {
 		for_each_matching_node(node, hgsl_component_match) {
@@ -4942,12 +5134,22 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 		/* TO DO: Set this flag to false after enabling per process page table. */
 		hgsl_dev->use_single_pt = true;
 	}
+
 	hgsl_sysfs_init(pdev);
 	hgsl_debugfs_init(pdev);
 
 	return 0;
 
 exit_dereg:
+	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
+		struct hgsl_gmugos *gmugos = &hgsl_dev->gmugos[i];
+
+		hgsl_hyp_deinit_ipcq(hgsl_dev, i);
+		for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++) {
+			hgsl_gmugos_irq_free(&gmugos->irq[j]);
+			gmugos->activated_irq[i][j] = 0;
+		}
+	}
 	qcom_hgsl_deregister(pdev);
 	return ret;
 }
@@ -4982,9 +5184,12 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 
 	mutex_lock(&hgsl->mutex);
 	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
+		hgsl_hyp_deinit_ipcq(hgsl, i);
 		gmugos = &hgsl->gmugos[i];
-		for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++)
+		for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++) {
 			hgsl_gmugos_irq_free(&gmugos->irq[j]);
+			gmugos->activated_irq[i][j] = 0;
+		}
 	}
 	mutex_unlock(&hgsl->mutex);
 

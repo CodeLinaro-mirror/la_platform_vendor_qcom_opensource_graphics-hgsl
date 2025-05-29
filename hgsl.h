@@ -56,6 +56,9 @@
 #define HGSL_TCSR_NUM 4
 
 #define HGSL_CONTEXT_NUM (256)
+#define HGSL_IPCQ_NUM     (2)
+#define HGSL_IPCQ_RGS_IDX (0)
+#define HGSL_IPCQ_GMU_IDX (1)
 
 #define USRPTR(a) u64_to_user_ptr((uint64_t)(a))
 
@@ -65,6 +68,25 @@
 		{ .cmd = (_cmd), .func = (_func) }
 
 #define HGSL_FEATURE_MASK_FV   BIT(0)
+#define HGSL_4DWORD_MASK (15)
+#define ALIGN_ADDRESS_4DWORD(addr)         (((addr)+HGSL_4DWORD_MASK) & \
+				((long long) ~HGSL_4DWORD_MASK))
+#define ALIGN_DWORD_ADDRESS_4DWORD(dwaddr) (ALIGN_ADDRESS_4DWORD((dwaddr) * \
+				sizeof(uint32_t)) / sizeof(uint32_t))
+
+#define HGSL_HFI_QUEUE_HEADER_SIZE_IN_DWORD     ALIGN_DWORD_ADDRESS_4DWORD( \
+				sizeof(struct HfiQueueHeader) / sizeof(uint32_t))
+#define HGSL_HFI_PKMD2HGSL_QUEUE_RBSIZE_IN_DWORD  (200)
+#define HGSL_HFI_PKMD_QUEUE_TOTAL_SIZE_IN_BYTES PAGE_ALIGN(ALIGN_DWORD_ADDRESS_4DWORD( \
+				HGSL_HFI_PKMD2HGSL_QUEUE_RBSIZE_IN_DWORD + \
+				HGSL_HFI_QUEUE_HEADER_SIZE_IN_DWORD) * sizeof(uint32_t))
+
+#define HGSL_HFI_GMU2HGSL_QUEUE_RBSIZE_IN_DWORD  (100)
+#define HGSL_HFI_HGSL2GMU_QUEUE_RBSIZE_IN_DWORD  (100)
+#define HGSL_HFI_GMU_QUEUE_TOTAL_SIZE_IN_BYTES PAGE_ALIGN( \
+				(HGSL_HFI_GMU2HGSL_QUEUE_RBSIZE_IN_DWORD + \
+				HGSL_HFI_HGSL2GMU_QUEUE_RBSIZE_IN_DWORD + \
+				HGSL_HFI_QUEUE_HEADER_SIZE_IN_DWORD * 2) * sizeof(uint32_t))
 
 enum {
 	HGSL_DB_SIGNAL_NONE = 0,
@@ -264,6 +286,7 @@ struct qcom_hgsl {
 
 	struct hgsl_init_param_t ipcq_settings[HGSL_DEVICE_NUM];
 	struct hgsl_gvm_settings gvm_settings[HGSL_DEVICE_NUM];
+	struct hgsl_ipcq_data_t ipcq_datas[HGSL_DEVICE_NUM][HGSL_IPCQ_NUM];
 
 	bool fv_on;
 	struct hgsl_mmu mmu;
@@ -284,6 +307,15 @@ struct qcom_hgsl {
 	struct dentry *debugfs;
 	struct dentry *clients_debugfs;
 	struct dentry *debugfs_stat;
+	/* HFI message queues */
+	void *PKMD2HGSL_queue[HGSL_DEVICE_NUM];
+	void *GMU2HGSL_queue[HGSL_DEVICE_NUM];
+	void *HGSL2GMU_queue[HGSL_DEVICE_NUM];
+
+	uint32_t hgsl_ipcq_msgbuf[HGSL_DEVICE_NUM][HGSL_IPCQ_NUM][MAX_HFI_MSG_SIZE];
+	struct hgsl_mem_node *ipcq_memnode[HGSL_DEVICE_NUM][HGSL_IPCQ_NUM];
+	struct iosys_map ipcq_memnode_vmap[HGSL_DEVICE_NUM][HGSL_IPCQ_NUM];
+	uint32_t irq_index;
 };
 
 /**
