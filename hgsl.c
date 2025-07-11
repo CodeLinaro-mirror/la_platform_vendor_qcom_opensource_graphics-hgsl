@@ -978,7 +978,7 @@ static void hgsl_dbcq_close(struct hgsl_context *ctxt)
     if (dbcq->queue_mem != NULL) {
         if (dbcq->queue_mem->dma_buf != NULL) {
             if (dbcq->queue_header != NULL) {
-                dma_buf_vunmap(dbcq->queue_mem->dma_buf, &dbcq->map);
+                dma_buf_vunmap_unlocked(dbcq->queue_mem->dma_buf, &dbcq->map);
                 dbcq->queue_header = NULL;
             }
             dma_buf_end_cpu_access(dbcq->queue_mem->dma_buf,
@@ -1032,7 +1032,7 @@ static int hgsl_dbcq_open(struct hgsl_priv *priv,
     }
 
     dma_buf_begin_cpu_access(dbcq->queue_mem->dma_buf, DMA_BIDIRECTIONAL);
-    ret = dma_buf_vmap(dbcq->queue_mem->dma_buf, &dbcq->map);
+    ret = dma_buf_vmap_unlocked(dbcq->queue_mem->dma_buf, &dbcq->map);
     if (ret) {
         LOGE("failed to map dbq buffer");
         goto err;
@@ -1323,7 +1323,7 @@ static void hgsl_reset_dbq(struct doorbell_queue *dbq)
         dma_buf_end_cpu_access(dbq->dma,
                        DMA_BIDIRECTIONAL);
         if (dbq->vbase) {
-            dma_buf_vunmap(dbq->dma, &dbq->map);
+            dma_buf_vunmap_unlocked(dbq->dma, &dbq->map);
             dbq->vbase = NULL;
         }
         dma_buf_put(dbq->dma);
@@ -1478,7 +1478,7 @@ static int hgsl_dbq_init(struct qcom_hgsl *hgsl,
     atomic_set(&dbq->seq_num, 0);
 
     dma_buf_begin_cpu_access(dbq->dma, DMA_BIDIRECTIONAL);
-    ret = dma_buf_vmap(dbq->dma, &dbq->map);
+    ret = dma_buf_vmap_unlocked(dbq->dma, &dbq->map);
     if (ret)
         goto err;
 
@@ -1518,7 +1518,7 @@ static void _cleanup_shadow(struct hgsl_hab_channel_t *hab_channel,
 
     if (mem_node->dma_buf) {
         if (ctxt->shadow_ts) {
-            dma_buf_vunmap(mem_node->dma_buf, &ctxt->map);
+            dma_buf_vunmap_unlocked(mem_node->dma_buf, &ctxt->map);
             ctxt->shadow_ts = NULL;
         }
         dma_buf_end_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
@@ -1696,7 +1696,7 @@ static void hgsl_get_shadowts_mem(struct hgsl_hab_channel_t *hab_channel,
     dma_buf = ctxt->shadow_ts_node->dma_buf;
     if (dma_buf) {
         dma_buf_begin_cpu_access(dma_buf, DMA_FROM_DEVICE);
-        ret = dma_buf_vmap(dma_buf, &ctxt->map);
+        ret = dma_buf_vmap_unlocked(dma_buf, &ctxt->map);
         if (ret)
             goto out;
         ctxt->shadow_ts = (struct shadow_ts *)ctxt->map.vaddr;
