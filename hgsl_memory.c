@@ -393,7 +393,7 @@ static void hgsl_get_sgt(struct device *dev, struct hgsl_mem_node *mem_node,
             return;
     }
 
-    mem_node->sgt_ext = dma_buf_map_attachment(mem_node->attach, DMA_BIDIRECTIONAL);
+    mem_node->sgt_ext = dma_buf_map_attachment_unlocked(mem_node->attach, DMA_BIDIRECTIONAL);
 }
 
 void hgsl_put_sgt(struct hgsl_mem_node *mem_node, bool internal)
@@ -408,7 +408,7 @@ void hgsl_put_sgt(struct hgsl_mem_node *mem_node, bool internal)
     }
 
     if (!IS_ERR_OR_NULL(mem_node->attach)) {
-        dma_buf_unmap_attachment(mem_node->attach,
+        dma_buf_unmap_attachment_unlocked(mem_node->attach,
                                 mem_node->sgt_ext,
                                 DMA_BIDIRECTIONAL);
         mem_node->sgt_ext = NULL;

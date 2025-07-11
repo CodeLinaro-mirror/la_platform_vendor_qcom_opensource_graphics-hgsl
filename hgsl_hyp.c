@@ -2583,7 +2583,7 @@ static int read_shadowts_mem_fe(struct hgsl_hab_channel_t *hab_channel,
         }
 
         dma_buf_begin_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
-        ret = dma_buf_vmap(mem_node->dma_buf, &ctxt->map);
+        ret = dma_buf_vmap_unlocked(mem_node->dma_buf, &ctxt->map);
         if (ret) {
             dma_buf_end_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
             ret = -EFAULT;
@@ -2642,7 +2642,7 @@ static int read_shadowts_mem_be(struct hgsl_hab_channel_t *hab_channel,
 
         mem_node->export_id = export_id;
         dma_buf_begin_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
-        ret = dma_buf_vmap(mem_node->dma_buf, &ctxt->map);
+        ret = dma_buf_vmap_unlocked(mem_node->dma_buf, &ctxt->map);
         if (ret) {
             dma_buf_end_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
             hgsl_hyp_put_shadowts_mem(hab_channel, mem_node);
@@ -2760,7 +2760,7 @@ int hgsl_hyp_ctxt_create_v1(struct device *dev,
 out:
     if (ret) {
         if (ctxt->shadow_ts) {
-            dma_buf_vunmap(ctxt->shadow_ts_node->dma_buf,
+            dma_buf_vunmap_unlocked(ctxt->shadow_ts_node->dma_buf,
                     &ctxt->map);
             dma_buf_end_cpu_access(ctxt->shadow_ts_node->dma_buf,
                         DMA_FROM_DEVICE);
