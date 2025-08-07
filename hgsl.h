@@ -175,6 +175,7 @@ struct qcom_hgsl {
     struct kobject *clients_sysfs;
     struct dentry *debugfs;
     struct dentry *clients_debugfs;
+    struct dentry *debugfs_stat;
 };
 
 /**
@@ -257,13 +258,37 @@ static inline bool hgsl_ts_ge(uint64_t a, uint64_t b, bool is64)
 static inline bool hgsl_mem_rb_empty(struct hgsl_priv *priv)
 {
     return (RB_EMPTY_ROOT(&priv->mem_mapped) &&
-        RB_EMPTY_ROOT(&priv->mem_allocated));
+            RB_EMPTY_ROOT(&priv->mem_allocated));
 }
 
 static inline u32 hgsl_hnd2id(u32 dev_hnd)
 {
     return (dev_hnd == GSL_HANDLE_NULL) ? (U32_MAX) :
         ((dev_hnd == GSL_HANDLE_DEV1) ? 1 : 0);
+}
+
+static inline uint32_t get_context_retired_ts(struct hgsl_context *ctxt)
+{
+    unsigned int ts = ctxt->shadow_ts->eop;
+
+    /* ensure read is done before comparison */
+    dma_rmb();
+    return ts;
+}
+
+static inline void set_context_retired_ts(struct hgsl_context *ctxt,
+        unsigned int ts)
+{
+    ctxt->shadow_ts->eop = ts;
+
+    /* ensure update is done before return */
+    dma_wmb();
+}
+
+static inline bool _timestamp_retired(struct hgsl_context *ctxt,
+        unsigned int timestamp)
+{
+    return hgsl_ts32_ge(get_context_retired_ts(ctxt), timestamp);
 }
 
 /**
@@ -329,35 +354,45 @@ struct hgsl_isync_fence {
     u64 ts;
 };
 
+struct hgsl_active_wait {
+    struct list_head head;
+    struct hgsl_context *ctxt;
+    unsigned int timestamp;
+};
+
 /* Fence for commands. */
 struct hgsl_hsync_fence *hgsl_hsync_fence_create(
-                    struct hgsl_context *context,
-                    uint32_t ts);
+        struct hgsl_context *context,
+        uint32_t ts);
 int hgsl_hsync_fence_create_fd(struct hgsl_context *context,
-                uint32_t ts);
+        uint32_t ts);
 int hgsl_hsync_timeline_create(struct hgsl_context *context);
 void hgsl_hsync_timeline_signal(struct hgsl_hsync_timeline *timeline,
-                        unsigned int ts);
+        unsigned int ts);
 void hgsl_hsync_timeline_put(struct hgsl_hsync_timeline *timeline);
 void hgsl_hsync_timeline_fini(struct hgsl_context *context);
 
 /* Fence for process sync. */
 int hgsl_isync_timeline_create(struct hgsl_priv *priv,
-                    uint32_t *timeline_id,
-                    uint32_t flags,
-                    uint64_t initial_ts);
+        uint32_t *timeline_id,
+        uint32_t flags,
+        uint64_t initial_ts);
 int hgsl_isync_timeline_destroy(struct hgsl_priv *priv, uint32_t id);
 void hgsl_isync_fini(struct hgsl_priv *priv);
 int hgsl_isync_fence_create(struct hgsl_priv *priv, uint32_t timeline_id,
-                uint32_t ts, bool ts_is_valid, int *fence_fd);
+        uint32_t ts, bool ts_is_valid, int *fence_fd);
 int hgsl_isync_fence_signal(struct hgsl_priv *priv, uint32_t timeline_id,
-                                   int fence_fd);
+        int fence_fd);
 int hgsl_isync_forward(struct hgsl_priv *priv, uint32_t timeline_id,
-                                uint64_t ts, bool check_owner);
+        uint64_t ts, bool check_owner);
 int hgsl_isync_query(struct hgsl_priv *priv, uint32_t timeline_id,
-                            uint64_t *ts);
+        uint64_t *ts);
 int hgsl_isync_wait_multiple(struct hgsl_priv *priv, struct hgsl_timeline_wait *param);
 
 void hgsl_retire_common(struct qcom_hgsl *hgsl, u32 dev_hnd);
+
+struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
+        uint32_t dev_hnd, uint32_t context_id);
+void hgsl_put_context(struct hgsl_context *ctxt);
 
 #endif /* __HGSL_H_ */

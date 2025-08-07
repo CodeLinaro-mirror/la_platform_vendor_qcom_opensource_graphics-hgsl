@@ -160,11 +160,6 @@ struct ctx_queue_header {
     uint32_t unused1;
 };
 
-static inline bool _timestamp_retired(struct hgsl_context *ctxt,
-                unsigned int timestamp);
-
-static inline void set_context_retired_ts(struct hgsl_context *ctxt,
-                unsigned int ts);
 static void _signal_contexts(struct qcom_hgsl *hgsl, u32 dev_hnd);
 
 static int db_get_busy_state(void *dbq_base);
@@ -173,10 +168,6 @@ static void db_set_busy_state(void *dbq_base, int in_busy);
 static int dbcq_get_free_indirect_ib_buffer(struct hgsl_priv  *priv,
                 struct hgsl_context *ctxt,
                 uint32_t ts, uint32_t timeout_in_ms);
-
-static struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
-                uint32_t dev_hnd, uint32_t context_id);
-static void hgsl_put_context(struct hgsl_context *ctxt);
 
 static bool dbq_check_ibdesc_state(struct qcom_hgsl *hgsl, struct hgsl_context *ctxt,
         uint32_t request_type);
@@ -371,13 +362,6 @@ struct db_ignore_retpacket {
     int in_use;
     struct db_msg_id db_msg_id;
 } __packed;
-
-
-struct hgsl_active_wait {
-    struct list_head head;
-    struct hgsl_context *ctxt;
-    unsigned int timestamp;
-};
 
 #ifdef CONFIG_TRACE_GPU_MEM
 static inline void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta)
@@ -1333,30 +1317,6 @@ static void hgsl_reset_dbq(struct doorbell_queue *dbq)
     dbq->state = DB_STATE_Q_UNINIT;
 }
 
-static inline uint32_t get_context_retired_ts(struct hgsl_context *ctxt)
-{
-    unsigned int ts = ctxt->shadow_ts->eop;
-
-    /* ensure read is done before comparison */
-    dma_rmb();
-    return ts;
-}
-
-static inline void set_context_retired_ts(struct hgsl_context *ctxt,
-                unsigned int ts)
-{
-    ctxt->shadow_ts->eop = ts;
-
-    /* ensure update is done before return */
-    dma_wmb();
-}
-
-static inline bool _timestamp_retired(struct hgsl_context *ctxt,
-                unsigned int timestamp)
-{
-    return hgsl_ts32_ge(get_context_retired_ts(ctxt), timestamp);
-}
-
 static inline void _destroy_context(struct kref *kref);
 static void _signal_contexts(struct qcom_hgsl *hgsl,
     u32 dev_hnd)
@@ -1562,7 +1522,7 @@ static inline void _destroy_context(struct kref *kref)
     ctxt->destroyed = true;
 }
 
-static struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
+struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
     uint32_t dev_hnd, uint32_t context_id)
 {
     struct hgsl_context *ctxt = NULL;
@@ -1625,7 +1585,7 @@ static struct hgsl_context *hgsl_remove_context(struct hgsl_priv *priv,
     return ctxt;
 }
 
-static void hgsl_put_context(struct hgsl_context *ctxt)
+void hgsl_put_context(struct hgsl_context *ctxt)
 {
     if (ctxt)
         kref_put(&ctxt->kref, _destroy_context);
@@ -1937,18 +1897,19 @@ static int hgsl_ctxt_create_dbq(struct hgsl_priv *priv,
     ctxt->dbq = &hgsl->dbq[dbq_idx];
     ctxt->tcsr_idx = ctxt->dbq->tcsr_idx;
     ctxt->db_signal = db_signal;
+    ctxt->dbq_info = dbq_info;
     hgsl_dbq_set_state_info(ctxt->dbq->vbase,
-                HGSL_DBQ_METADATA_CONTEXT_INFO,
-                ctxt->context_id,
-                HGSL_DBQ_CONTEXT_DESTROY_OFFSET_IN_DWORD,
-                0);
+            HGSL_DBQ_METADATA_CONTEXT_INFO,
+            ctxt->context_id,
+            HGSL_DBQ_CONTEXT_DESTROY_OFFSET_IN_DWORD,
+            0);
     return 0;
 }
 
 static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
-    struct hgsl_hab_channel_t *hab_channel,
-    u32 dev_hnd, uint32_t context_id,
-    uint32_t *rval, bool can_retry)
+        struct hgsl_hab_channel_t *hab_channel,
+        u32 dev_hnd, uint32_t context_id,
+        uint32_t *rval, bool can_retry)
 {
     struct hgsl_context *ctxt = NULL;
     int ret;
@@ -2009,7 +1970,7 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
         _cleanup_shadow(hab_channel, ctxt);
 
     ret = hgsl_hyp_ctxt_destroy(hab_channel,
-        ctxt->devhandle, ctxt->context_id, rval, ctxt->dbcq_export_id);
+            ctxt->devhandle, ctxt->context_id, rval, ctxt->dbcq_export_id);
 
     hgsl_dbcq_close(ctxt);
 
@@ -2025,22 +1986,22 @@ out:
 }
 
 static inline bool hgsl_use_gmugos_or_global_dbq(
-    struct hgsl_context *ctxt)
+        struct hgsl_context *ctxt)
 {
     return (ctxt && ctxt->shadow_ts && (ctxt->dbq || ctxt->dbcq) &&
-        (is_global_db(ctxt->tcsr_idx) || is_gmugos(ctxt->db_signal)));
+            (is_global_db(ctxt->tcsr_idx) || is_gmugos(ctxt->db_signal)));
 }
 
 static inline bool hgsl_ctxt_use_dbq(
-    struct hgsl_context *ctxt)
+        struct hgsl_context *ctxt)
 {
     return (ctxt &&	(ctxt->dbq || ctxt->dbcq) &&
-        (ctxt->shadow_ts || !is_global_db(ctxt->tcsr_idx)));
+            (ctxt->shadow_ts || !is_global_db(ctxt->tcsr_idx)));
 }
 
 static int hgsl_ioctl_ctxt_create(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct qcom_hgsl *hgsl = priv->dev;
@@ -2124,7 +2085,7 @@ static int hgsl_ioctl_ctxt_create(
     write_lock(&hgsl->ctxt_lock);
     if (hgsl->contexts[dev_id][ctxt->context_id]) {
         LOGE("context id %d already created",
-            ctxt->context_id);
+                ctxt->context_id);
         ret = -EBUSY;
         write_unlock(&hgsl->ctxt_lock);
         goto out;
@@ -2139,13 +2100,13 @@ out:
     if (ret) {
         if (ctxt_created)
             hgsl_ctxt_destroy(priv, hab_channel, params->devhandle,
-                params->ctxthandle, NULL, false);
+                    params->ctxthandle, NULL, false);
         else if (ctxt && (params->ctxthandle < HGSL_CONTEXT_NUM)) {
             if (!ctxt->is_fe_shadow)
                 _cleanup_shadow(hab_channel, ctxt);
             hgsl_hyp_ctxt_destroy(hab_channel, ctxt->devhandle,
-                        ctxt->context_id, NULL,
-                        ctxt->dbcq_export_id);
+                    ctxt->context_id, NULL,
+                    ctxt->dbcq_export_id);
             hgsl_dbcq_close(ctxt);
             if (ctxt->is_fe_shadow)
                 _cleanup_shadow(hab_channel, ctxt);
@@ -2159,8 +2120,8 @@ out:
 }
 
 static int hgsl_ioctl_ctxt_destroy(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_ctxt_destroy_params *params = data;
@@ -2183,7 +2144,7 @@ out:
 }
 
 static int hgsl_wait_timestamp(struct qcom_hgsl *hgsl,
-    struct hgsl_context *ctxt, struct hgsl_wait_ts_info *param)
+        struct hgsl_context *ctxt, struct hgsl_wait_ts_info *param)
 {
     struct hgsl_active_wait *wait = NULL;
     unsigned int timestamp;
@@ -2210,9 +2171,9 @@ static int hgsl_wait_timestamp(struct qcom_hgsl *hgsl,
     spin_unlock(&hgsl->active_wait_lock);
 
     ret = wait_event_interruptible_timeout(ctxt->wait_q,
-                _timestamp_retired(ctxt, timestamp) ||
-                        ctxt->in_destroy,
-                msecs_to_jiffies(param->timeout));
+            _timestamp_retired(ctxt, timestamp) ||
+            ctxt->in_destroy,
+            msecs_to_jiffies(param->timeout));
     if (ret == 0)
         ret = -ETIMEDOUT;
     else if (ret == -ERESTARTSYS)
@@ -2231,8 +2192,8 @@ out:
 }
 
 static int hgsl_ioctl_hyp_generic_transaction(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_hyp_generic_transaction_params
@@ -2249,16 +2210,16 @@ static int hgsl_ioctl_hyp_generic_transaction(
 
 
     if ((params->send_num > HGSL_HYP_GENERAL_MAX_SEND_NUM) ||
-        (params->reply_num > HGSL_HYP_GENERAL_MAX_REPLY_NUM)) {
+            (params->reply_num > HGSL_HYP_GENERAL_MAX_REPLY_NUM)) {
         ret = -EINVAL;
         LOGE("invalid Send %d or reply %d number\n",
-            params->send_num, params->reply_num);
+                params->send_num, params->reply_num);
         goto out;
     }
 
     for (i = 0; i < params->send_num; i++) {
         if ((params->send_size[i] > HGSL_HYP_GENERAL_MAX_SIZE) ||
-            (params->send_size[i] == 0)) {
+                (params->send_size[i] == 0)) {
             LOGE("Invalid size 0x%x for %d\n", params->send_size[i], i);
             ret = -EINVAL;
             goto out;
@@ -2269,8 +2230,8 @@ static int hgsl_ioctl_hyp_generic_transaction(
                 goto out;
             }
             if (copy_from_user(pSend[i],
-                USRPTR(params->send_data[i]),
-                params->send_size[i])) {
+                        USRPTR(params->send_data[i]),
+                        params->send_size[i])) {
                 LOGE("Failed to copy send data %d\n", i);
                 ret = -EFAULT;
                 goto out;
@@ -2280,7 +2241,7 @@ static int hgsl_ioctl_hyp_generic_transaction(
 
     for (i = 0; i < params->reply_num; i++) {
         if ((params->reply_size[i] > HGSL_HYP_GENERAL_MAX_SIZE) ||
-            (params->reply_size[i] == 0)) {
+                (params->reply_size[i] == 0)) {
             ret = -EINVAL;
             goto out;
         } else {
@@ -2297,19 +2258,19 @@ static int hgsl_ioctl_hyp_generic_transaction(
         pRval = &ret_value;
 
     ret = hgsl_hyp_generic_transaction(&priv->hyp_priv,
-                    params, pSend, pReply, pRval);
+            params, pSend, pReply, pRval);
 
     if (ret == 0) {
         for (i = 0; i < params->reply_num; i++) {
             if (copy_to_user(USRPTR(params->reply_data[i]),
-                pReply[i], params->reply_size[i])) {
+                        pReply[i], params->reply_size[i])) {
                 ret = -EFAULT;
                 goto out;
             }
         }
         if (params->ret_value) {
             if (copy_to_user(USRPTR(params->ret_value),
-                &ret_value, sizeof(ret_value)))
+                        &ret_value, sizeof(ret_value)))
                 ret = -EFAULT;
         }
     }
@@ -2324,8 +2285,8 @@ out:
 }
 
 static int hgsl_ioctl_mem_alloc(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_mem_alloc_params *params = data;
@@ -2367,12 +2328,12 @@ static int hgsl_ioctl_mem_alloc(
 
     ret = hgsl_hyp_mem_map_smmu(hab_channel, mem_node->memdesc.size, 0, mem_node);
     LOGD("%d, %d, gpuaddr 0x%llx",
-        ret, mem_node->export_id, mem_node->memdesc.gpuaddr);
+            ret, mem_node->export_id, mem_node->memdesc.gpuaddr);
     if (ret)
         goto out;
 
     if (copy_to_user(USRPTR(params->memdesc),
-        &mem_node->memdesc, sizeof(mem_node->memdesc))) {
+                &mem_node->memdesc, sizeof(mem_node->memdesc))) {
         ret = -EFAULT;
         goto out;
     }
@@ -2405,8 +2366,8 @@ out:
 }
 
 static int hgsl_ioctl_mem_free(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_mem_free_params *params = data;
@@ -2422,7 +2383,7 @@ static int hgsl_ioctl_mem_free(
     }
 
     if (copy_from_user(&memdesc, USRPTR(params->memdesc),
-        sizeof(memdesc))) {
+                sizeof(memdesc))) {
         LOGE("failed to copy memdesc from user");
         ret = -EFAULT;
         goto out;
@@ -2430,7 +2391,7 @@ static int hgsl_ioctl_mem_free(
 
     mutex_lock(&priv->lock);
     node_found = hgsl_mem_find_node_locked(&priv->mem_allocated,
-                    memdesc.gpuaddr, memdesc.size64, true);
+            memdesc.gpuaddr, memdesc.size64, true);
     if (node_found)
         rb_erase(&node_found->mem_rb_node, &priv->mem_allocated);
     mutex_unlock(&priv->lock);
@@ -2450,7 +2411,7 @@ static int hgsl_ioctl_mem_free(
         }
     } else
         LOGE("can't find the memory 0x%llx, 0x%x",
-            memdesc.gpuaddr, memdesc.size);
+                memdesc.gpuaddr, memdesc.size);
 
 out:
     hgsl_hyp_channel_pool_put(hab_channel);
@@ -2458,8 +2419,8 @@ out:
 }
 
 static int hgsl_ioctl_set_metainfo(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_set_metainfo_params *params = data;
@@ -2475,7 +2436,7 @@ static int hgsl_ioctl_set_metainfo(
         goto out;
     }
     if (copy_from_user(metainfo, USRPTR(params->metainfo),
-                    params->metainfo_len)) {
+                params->metainfo_len)) {
         LOGE("failed to copy metainfo from user");
         ret = -EFAULT;
         goto out;
@@ -2492,7 +2453,7 @@ static int hgsl_ioctl_set_metainfo(
     }
     if (mem_node) {
         strscpy(mem_node->metainfo, metainfo,
-            sizeof(mem_node->metainfo));
+                sizeof(mem_node->metainfo));
     }
     mutex_unlock(&priv->lock);
 
@@ -2509,8 +2470,8 @@ out:
 }
 
 static int hgsl_ioctl_mem_map_smmu(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct qcom_hgsl *hgsl = priv->dev;
@@ -2541,7 +2502,7 @@ static int hgsl_ioctl_mem_map_smmu(
         goto out;
 
     if (copy_to_user(USRPTR(params->memdesc), &mem_node->memdesc,
-        sizeof(mem_node->memdesc))) {
+                sizeof(mem_node->memdesc))) {
         ret = -EFAULT;
         goto out;
     }
@@ -2562,8 +2523,8 @@ out:
 }
 
 static int hgsl_ioctl_mem_unmap_smmu(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_mem_unmap_smmu_params *params = data;
@@ -2579,7 +2540,7 @@ static int hgsl_ioctl_mem_unmap_smmu(
 
     mutex_lock(&priv->lock);
     node_found = hgsl_mem_find_node_locked(&priv->mem_mapped,
-                    params->gpuaddr, params->size, true);
+            params->gpuaddr, params->size, true);
     if (node_found)
         rb_erase(&node_found->mem_rb_node, &priv->mem_mapped);
     mutex_unlock(&priv->lock);
@@ -2608,8 +2569,8 @@ out:
 }
 
 static int hgsl_ioctl_mem_cache_operation(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_mem_cache_operation_params
@@ -2628,15 +2589,15 @@ static int hgsl_ioctl_mem_cache_operation(
 
     mutex_lock(&priv->lock);
     node_found = hgsl_mem_find_node_locked(&priv->mem_allocated,
-                    gpuaddr, params->sizebytes, false);
+            gpuaddr, params->sizebytes, false);
     if (node_found)
         internal = true;
     else {
         node_found = hgsl_mem_find_node_locked(&priv->mem_mapped,
-                    gpuaddr, params->sizebytes, false);
+                gpuaddr, params->sizebytes, false);
         if (!node_found) {
             LOGE("failed to find gpuaddr: 0x%llx size: 0x%llx",
-                gpuaddr, params->sizebytes);
+                    gpuaddr, params->sizebytes);
             ret = -EINVAL;
             mutex_unlock(&priv->lock);
             goto out;
@@ -2655,8 +2616,8 @@ out:
 }
 
 static int hgsl_ioctl_mem_get_fd(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_mem_get_fd_params *params = data;
@@ -2665,7 +2626,7 @@ static int hgsl_ioctl_mem_get_fd(
     int ret = 0;
 
     if (copy_from_user(&memdesc, USRPTR(params->memdesc),
-        sizeof(memdesc))) {
+                sizeof(memdesc))) {
         LOGE("failed to copy memdesc from user");
         ret = -EFAULT;
         goto out;
@@ -2673,7 +2634,7 @@ static int hgsl_ioctl_mem_get_fd(
 
     mutex_lock(&priv->lock);
     node_found = hgsl_mem_find_node_locked(&priv->mem_allocated,
-                memdesc.gpuaddr, memdesc.size64, true);
+            memdesc.gpuaddr, memdesc.size64, true);
     if (node_found && node_found->dma_buf)
         get_dma_buf(node_found->dma_buf);
     else
@@ -2690,20 +2651,20 @@ static int hgsl_ioctl_mem_get_fd(
         }
     } else
         LOGE("can't find the memory 0x%llx, 0x%x, node_found:%p",
-             memdesc.gpuaddr, memdesc.size, node_found);
+                memdesc.gpuaddr, memdesc.size, node_found);
 
 out:
     return ret;
 }
 
 static int hgsl_db_issueib_with_alloc_list(struct hgsl_priv *priv,
-    struct hgsl_ioctl_issueib_with_alloc_list_params *param,
-    struct hgsl_context *ctxt,
-    struct gsl_command_buffer_object_t *ib,
-    struct gsl_memory_object_t *allocations,
-    struct gsl_memdesc_t *be_descs,
-    uint64_t *be_offsets,
-    uint32_t *timestamp)
+        struct hgsl_ioctl_issueib_with_alloc_list_params *param,
+        struct hgsl_context *ctxt,
+        struct gsl_command_buffer_object_t *ib,
+        struct gsl_memory_object_t *allocations,
+        struct gsl_memdesc_t *be_descs,
+        uint64_t *be_offsets,
+        uint32_t *timestamp)
 {
     int ret = 0;
     struct hgsl_fw_ib_desc *ib_descs = NULL;
@@ -2734,7 +2695,7 @@ static int hgsl_db_issueib_with_alloc_list(struct hgsl_priv *priv,
                 be_descs[i + param->num_ibs].gpuaddr +
                 allocations[i].offset +
                 be_offsets[i + param->num_ibs];
-                gmu_flags |= CMDBATCH_PROFILING;
+            gmu_flags |= CMDBATCH_PROFILING;
             break;
         }
     }
@@ -2747,10 +2708,10 @@ out:
 }
 
 static int hgsl_db_issueib(struct hgsl_priv *priv,
-    struct hgsl_ioctl_issueib_params *param,
-    struct hgsl_context *ctxt,
-    struct hgsl_ibdesc *ibs,
-    uint32_t *timestamp)
+        struct hgsl_ioctl_issueib_params *param,
+        struct hgsl_context *ctxt,
+        struct hgsl_ibdesc *ibs,
+        uint32_t *timestamp)
 {
     int ret = 0;
     struct hgsl_fw_ib_desc *ib_descs = NULL;
@@ -2782,8 +2743,8 @@ out:
 }
 
 static int hgsl_ioctl_issueib(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_issueib_params *params = data;
@@ -2793,11 +2754,11 @@ static int hgsl_ioctl_issueib(
     uint32_t ts = 0;
     bool remote_issueib = false;
     struct hgsl_context *ctxt = hgsl_get_context_owner(
-        priv, params->devhandle, params->ctxthandle);
+            priv, params->devhandle, params->ctxthandle);
 
     if (params->num_ibs == 0 || !ctxt) {
         LOGE("num_ibs %u or invalid context id %d",
-            params->num_ibs, params->ctxthandle);
+                params->num_ibs, params->ctxthandle);
         ret = -EINVAL;
         goto out;
     }
@@ -2833,12 +2794,12 @@ out:
 }
 
 static int hgsl_ioctl_issueib_with_alloc_list(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_issueib_with_alloc_list_params
-                *params = data;
+        *params = data;
     int ret = 0;
     struct gsl_command_buffer_object_t *ibs = NULL;
     struct gsl_memory_object_t *allocations = NULL;
@@ -2850,11 +2811,11 @@ static int hgsl_ioctl_issueib_with_alloc_list(
     uint32_t ts = 0;
     bool remote_issueib = false;
     struct hgsl_context *ctxt = hgsl_get_context_owner(
-        priv, params->devhandle, params->ctxthandle);
+            priv, params->devhandle, params->ctxthandle);
 
     if (params->num_ibs == 0 || !ctxt) {
         LOGE("num_ibs %u or invalid context id %d",
-            params->num_ibs, params->ctxthandle);
+                params->num_ibs, params->ctxthandle);
         ret = -EINVAL;
         goto out;
     }
@@ -2882,7 +2843,7 @@ static int hgsl_ioctl_issueib_with_alloc_list(
                 goto out;
             }
             if (copy_from_user(allocations, USRPTR(params->allocations),
-                allocation_size)) {
+                        allocation_size)) {
                 ret = -EFAULT;
                 goto out;
             }
@@ -2891,7 +2852,7 @@ static int hgsl_ioctl_issueib_with_alloc_list(
         if (params->num_ibs > UINT_MAX - params->num_allocations) {
             ret = -ENOMEM;
             LOGE("Too many ibs or allocations: num_ibs = %u, num_allocations = %u",
-                params->num_ibs, params->num_allocations);
+                    params->num_ibs, params->num_allocations);
             goto out;
         }
         be_data_size = (params->num_ibs + params->num_allocations) *
@@ -2902,7 +2863,7 @@ static int hgsl_ioctl_issueib_with_alloc_list(
             goto out;
         }
         be_offsets = (uint64_t *)&be_descs[params->num_ibs +
-                            params->num_allocations];
+            params->num_allocations];
         if (copy_from_user(be_descs, USRPTR(params->be_data), be_data_size)) {
             ret = -EFAULT;
             goto out;
@@ -2910,7 +2871,7 @@ static int hgsl_ioctl_issueib_with_alloc_list(
 
         ts = params->timestamp;
         ret = hgsl_db_issueib_with_alloc_list(priv, params, ctxt, ibs,
-                    allocations, be_descs, be_offsets, &ts);
+                allocations, be_descs, be_offsets, &ts);
         if (!ret) {
             params->rval = GSL_SUCCESS;
             params->timestamp = ts;
@@ -2919,7 +2880,7 @@ static int hgsl_ioctl_issueib_with_alloc_list(
     }
     if (remote_issueib)
         ret = hgsl_hyp_issueib_with_alloc_list(&priv->hyp_priv,
-            params, ibs, allocations, be_descs, be_offsets);
+                params, ibs, allocations, be_descs, be_offsets);
 
 out:
     hgsl_put_context(ctxt);
@@ -2930,8 +2891,8 @@ out:
 }
 
 static int hgsl_ioctl_wait_timestamp(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct qcom_hgsl *hgsl = priv->dev;
@@ -2952,8 +2913,8 @@ static int hgsl_ioctl_wait_timestamp(
         remote_wait = true;
     } else {
         ret = hgsl_check_shadow_timestamp(ctxt,
-                    GSL_TIMESTAMP_RETIRED, param->timestamp,
-                    &expired);
+                GSL_TIMESTAMP_RETIRED, param->timestamp,
+                &expired);
 
         if (ret)
             remote_wait = true;
@@ -2973,8 +2934,8 @@ static int hgsl_ioctl_wait_timestamp(
 }
 
 static int hgsl_ioctl_read_timestamp(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_read_ts_params *param = data;
@@ -2989,7 +2950,7 @@ static int hgsl_ioctl_read_timestamp(
     }
 
     ret = hgsl_read_shadow_timestamp(ctxt,
-                    param->type, &param->timestamp);
+            param->type, &param->timestamp);
 
     hgsl_put_context(ctxt);
     if (ret)
@@ -2999,8 +2960,8 @@ static int hgsl_ioctl_read_timestamp(
 }
 
 static int hgsl_ioctl_check_timestamp(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_check_ts_params *param = data;
@@ -3016,7 +2977,7 @@ static int hgsl_ioctl_check_timestamp(
     }
 
     ret = hgsl_check_shadow_timestamp(ctxt, param->type,
-                        param->timestamp, &expired);
+            param->timestamp, &expired);
 
     if (ret)
         param->rval = -1;
@@ -3032,8 +2993,8 @@ static int hgsl_ioctl_check_timestamp(
 }
 
 static int hgsl_ioctl_get_system_time(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     uint64_t *param = data;
@@ -3045,8 +3006,8 @@ static int hgsl_ioctl_get_system_time(
 }
 
 static int hgsl_ioctl_syncobj_wait_multiple(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_syncobj_wait_multiple_params
@@ -3058,8 +3019,8 @@ static int hgsl_ioctl_syncobj_wait_multiple(
     size_t status_size = 0;
 
     if ((param->num_syncobjs == 0) ||
-        (param->num_syncobjs > (SIZE_MAX / sizeof(uint64_t))) ||
-        (param->num_syncobjs > (SIZE_MAX / sizeof(int32_t)))) {
+            (param->num_syncobjs > (SIZE_MAX / sizeof(uint64_t))) ||
+            (param->num_syncobjs > (SIZE_MAX / sizeof(int32_t)))) {
         LOGE("invalid num_syncobjs %zu", param->num_syncobjs);
         return -EINVAL;
         goto out;
@@ -3073,7 +3034,7 @@ static int hgsl_ioctl_syncobj_wait_multiple(
         goto out;
     }
     if (copy_from_user(rpc_syncobj, USRPTR(param->rpc_syncobj),
-        rpc_syncobj_size)) {
+                rpc_syncobj_size)) {
         LOGE("failed to copy param from user");
         ret = -EFAULT;
         goto out;
@@ -3089,7 +3050,7 @@ static int hgsl_ioctl_syncobj_wait_multiple(
     memset(status, 0, status_size);
 
     ret = hgsl_hyp_syncobj_wait_multiple(&priv->hyp_priv, rpc_syncobj,
-        param->num_syncobjs, param->timeout_ms, status, &param->result);
+            param->num_syncobjs, param->timeout_ms, status, &param->result);
 
     if (ret == 0) {
         if (copy_to_user(USRPTR(param->status), status, status_size)) {
@@ -3105,8 +3066,8 @@ out:
 }
 
 static int hgsl_ioctl_perfcounter_select(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_perfcounter_select_params *param = data;
@@ -3117,14 +3078,14 @@ static int hgsl_ioctl_perfcounter_select(
     uint32_t *counter_val_hi_regs = NULL;
 
     if ((param->num_counters <= 0) ||
-        (param->num_counters > (SIZE_MAX / (sizeof(int32_t) * 4)))) {
+            (param->num_counters > (SIZE_MAX / (sizeof(int32_t) * 4)))) {
         LOGE("invalid num_counters %zu", param->num_counters);
         return -EINVAL;
         goto out;
     }
 
     groups = (uint32_t *)hgsl_malloc(
-        sizeof(int32_t) * 4 * param->num_counters);
+            sizeof(int32_t) * 4 * param->num_counters);
     if (groups == NULL) {
         LOGE("failed to allocate memory");
         ret = -ENOMEM;
@@ -3136,32 +3097,32 @@ static int hgsl_ioctl_perfcounter_select(
     counter_val_hi_regs = counter_val_regs + param->num_counters;
 
     if (copy_from_user(groups, USRPTR(param->groups),
-        sizeof(uint32_t) * param->num_counters)) {
+                sizeof(uint32_t) * param->num_counters)) {
         LOGE("failed to copy groups from user");
         ret = -EFAULT;
         goto out;
     }
     if (copy_from_user(counter_ids, USRPTR(param->counter_ids),
-        sizeof(uint32_t) * param->num_counters)) {
+                sizeof(uint32_t) * param->num_counters)) {
         LOGE("failed to copy counter_ids from user");
         ret = -EFAULT;
         goto out;
     }
 
     ret = hgsl_hyp_perfcounter_select(&priv->hyp_priv, param, groups,
-        counter_ids, counter_val_regs, counter_val_hi_regs);
+            counter_ids, counter_val_regs, counter_val_hi_regs);
 
     if (!ret) {
         if (copy_to_user(USRPTR(param->counter_val_regs),
-            counter_val_regs,
-            sizeof(uint32_t) * param->num_counters)) {
+                    counter_val_regs,
+                    sizeof(uint32_t) * param->num_counters)) {
             ret = -EFAULT;
             goto out;
         }
         if (param->counter_val_hi_regs) {
             if (copy_to_user(USRPTR(param->counter_val_hi_regs),
-                counter_val_hi_regs,
-                sizeof(uint32_t) * param->num_counters)) {
+                        counter_val_hi_regs,
+                        sizeof(uint32_t) * param->num_counters)) {
                 ret = -EFAULT;
                 goto out;
             }
@@ -3174,8 +3135,8 @@ out:
 }
 
 static int hgsl_ioctl_perfcounter_deselect(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_perfcounter_deselect_params
@@ -3185,14 +3146,14 @@ static int hgsl_ioctl_perfcounter_deselect(
     uint32_t *counter_ids = NULL;
 
     if ((param->num_counters <= 0) ||
-        (param->num_counters > (SIZE_MAX / (sizeof(int32_t) * 2)))) {
+            (param->num_counters > (SIZE_MAX / (sizeof(int32_t) * 2)))) {
         LOGE("invalid num_counters %zu", param->num_counters);
         return -EINVAL;
         goto out;
     }
 
     groups = (uint32_t *)hgsl_malloc(
-        sizeof(int32_t) * 2 * param->num_counters);
+            sizeof(int32_t) * 2 * param->num_counters);
     if (groups == NULL) {
         LOGE("failed to allocate memory");
         ret = -ENOMEM;
@@ -3214,7 +3175,7 @@ static int hgsl_ioctl_perfcounter_deselect(
         goto out;
     }
     ret = hgsl_hyp_perfcounter_deselect(&priv->hyp_priv,
-        param, groups, counter_ids);
+            param, groups, counter_ids);
 
 out:
     hgsl_free(groups);
@@ -3222,8 +3183,8 @@ out:
 }
 
 static int hgsl_ioctl_perfcounter_query_selection(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_perfcounter_query_selections_params
@@ -3232,14 +3193,14 @@ static int hgsl_ioctl_perfcounter_query_selection(
     int32_t *selections = NULL;
 
     if ((param->num_counters <= 0) ||
-        (param->num_counters > (SIZE_MAX / sizeof(int32_t)))) {
+            (param->num_counters > (SIZE_MAX / sizeof(int32_t)))) {
         LOGE("invalid num_counters %zu", param->num_counters);
         return -EINVAL;
         goto out;
     }
 
     selections = (int32_t *)hgsl_malloc(
-        sizeof(int32_t) * param->num_counters);
+            sizeof(int32_t) * param->num_counters);
     if (selections == NULL) {
         LOGE("failed to allocate memory");
         ret = -ENOMEM;
@@ -3248,14 +3209,14 @@ static int hgsl_ioctl_perfcounter_query_selection(
     memset(selections, 0, sizeof(int32_t)  * param->num_counters);
 
     ret = hgsl_hyp_perfcounter_query_selections(&priv->hyp_priv,
-                            param, selections);
+            param, selections);
 
     if (ret)
         goto out;
 
     if (param->selections != 0) {
         if (copy_to_user(USRPTR(param->selections), selections,
-            sizeof(int32_t) * param->num_counters)) {
+                    sizeof(int32_t) * param->num_counters)) {
             ret = -EFAULT;
             goto out;
         }
@@ -3267,8 +3228,8 @@ out:
 }
 
 static int hgsl_ioctl_perfcounter_read(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_ioctl_perfcounter_read_params *param = data;
@@ -3280,7 +3241,7 @@ static int hgsl_open(struct inode *inodep, struct file *filep)
 {
     struct hgsl_priv *priv = NULL;
     struct qcom_hgsl  *hgsl = container_of(inodep->i_cdev,
-                           struct qcom_hgsl, cdev);
+            struct qcom_hgsl, cdev);
     struct pid *pid = task_tgid(current);
     struct task_struct *task = pid_task(pid, PIDTYPE_PID);
     pid_t pid_nr;
@@ -3311,7 +3272,7 @@ static int hgsl_open(struct inode *inodep, struct file *filep)
     priv->pid = pid_nr;
 
     ret = hgsl_hyp_init(&priv->hyp_priv, hgsl->dev,
-        priv->pid, task->comm);
+            priv->pid, task->comm);
     if (ret != 0)
         goto out;
 
@@ -3431,7 +3392,7 @@ static void hgsl_release_worker(struct work_struct *work)
         mutex_lock(&hgsl->mutex);
         if (!list_empty(&hgsl->release_list)) {
             priv = container_of(hgsl->release_list.next,
-                struct hgsl_priv, node);
+                    struct hgsl_priv, node);
             list_del(&priv->node);
         } else {
             priv = NULL;
@@ -3489,8 +3450,8 @@ static int hgsl_release(struct inode *inodep, struct file *filep)
 }
 
 static int hgsl_ioctl_hsync_fence_create(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct qcom_hgsl *hgsl = priv->dev;
@@ -3524,8 +3485,8 @@ out:
 }
 
 static int hgsl_ioctl_isync_timeline_create(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     uint32_t *param = data;
@@ -3534,8 +3495,8 @@ static int hgsl_ioctl_isync_timeline_create(
 }
 
 static int hgsl_ioctl_isync_timeline_destroy(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     uint32_t *param = data;
@@ -3544,8 +3505,8 @@ static int hgsl_ioctl_isync_timeline_destroy(
 }
 
 static int hgsl_ioctl_isync_fence_create(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_isync_create_fence *param = data;
@@ -3556,7 +3517,7 @@ static int hgsl_ioctl_isync_fence_create(
     ts_is_valid = (param->padding == HGSL_ISYNC_FENCE_CREATE_USE_TS);
 
     ret = hgsl_isync_fence_create(priv, param->timeline_id, param->ts,
-                        ts_is_valid, &fence);
+            ts_is_valid, &fence);
 
     if (ret == 0)
         param->fence_id = fence;
@@ -3565,41 +3526,41 @@ static int hgsl_ioctl_isync_fence_create(
 }
 
 static int hgsl_ioctl_isync_fence_signal(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_isync_signal_fence *param = data;
 
     return hgsl_isync_fence_signal(priv, param->timeline_id,
-                          param->fence_id);
+            param->fence_id);
 }
 
 static int hgsl_ioctl_isync_forward(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_isync_forward *param = data;
 
     return hgsl_isync_forward(priv, param->timeline_id,
-                          (uint64_t)param->ts, true);
+            (uint64_t)param->ts, true);
 }
 
 static int hgsl_ioctl_timeline_create(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_timeline_create *param = data;
 
     return hgsl_isync_timeline_create(priv, &param->timeline_id,
-                    HGSL_ISYNC_64BITS_TIMELINE, param->initial_ts);
+            HGSL_ISYNC_64BITS_TIMELINE, param->initial_ts);
 }
 
 static int hgsl_ioctl_timeline_signal(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_timeline_signal *param = data;
@@ -3616,7 +3577,7 @@ static int hgsl_ioctl_timeline_signal(
         struct hgsl_timeline_val val;
 
         if (copy_struct_from_user(&val, sizeof(val),
-            USRPTR(timelines), param->timelines_size))
+                    USRPTR(timelines), param->timelines_size))
             return -EFAULT;
 
         if (val.padding)
@@ -3633,8 +3594,8 @@ static int hgsl_ioctl_timeline_signal(
 }
 
 static int hgsl_ioctl_timeline_query(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_timeline_query *param = data;
@@ -3651,7 +3612,7 @@ static int hgsl_ioctl_timeline_query(
         struct hgsl_timeline_val val;
 
         if (copy_struct_from_user(&val, sizeof(val),
-            USRPTR(timelines), param->timelines_size))
+                    USRPTR(timelines), param->timelines_size))
             return -EFAULT;
 
         if (val.padding)
@@ -3670,8 +3631,8 @@ static int hgsl_ioctl_timeline_query(
 }
 
 static int hgsl_ioctl_timeline_wait(
-    struct file *filep,
-    void *data)
+        struct file *filep,
+        void *data)
 {
     struct hgsl_priv *priv = filep->private_data;
     struct hgsl_timeline_wait *param = data;
@@ -3766,29 +3727,29 @@ static long hgsl_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
     copy_size = min(_IOC_SIZE(ioctls[nr].cmd), _IOC_SIZE(cmd));
     if (unlikely(copy_size > sizeof(data))) {
         pr_err_ratelimited("data too big for ioctl 0x%08x: %u/%zu\n",
-            cmd, copy_size, sizeof(data));
+                cmd, copy_size, sizeof(data));
         return -EINVAL;
     }
 
     if (unlikely((ioctls[nr].cmd) != cmd))
         pr_warn_ratelimited("mismatch cmd [0x%08x 0x%08x]\n",
-            ioctls[nr].cmd, cmd);
+                ioctls[nr].cmd, cmd);
 
     if (copy_size && (ioctls[nr].cmd & IOC_IN) &&
-        copy_from_user(data, USRPTR(arg), copy_size))
+            copy_from_user(data, USRPTR(arg), copy_size))
         return -EFAULT;
 
     ret = ioctls[nr].func(filep, (void *)data);
 
     if (copy_size && (ioctls[nr].cmd & IOC_OUT) &&
-        copy_to_user(USRPTR(arg), data, copy_size))
+            copy_to_user(USRPTR(arg), data, copy_size))
         return (ret ? ret : -EFAULT);
 
     return ret;
 }
 
 static long hgsl_compat_ioctl(struct file *filep, unsigned int cmd,
-    unsigned long arg)
+        unsigned long arg)
 {
     return hgsl_ioctl(filep, cmd, arg);
 }
@@ -3802,13 +3763,13 @@ static const struct file_operations hgsl_fops = {
 };
 
 static int qcom_hgsl_register(struct platform_device *pdev,
-                struct qcom_hgsl *hgsl_dev)
+        struct qcom_hgsl *hgsl_dev)
 {
     int ret;
 
     ret = alloc_chrdev_region(&hgsl_dev->device_no, 0,
-                        HGSL_DEV_NUM,
-                        HGSL_DEVICE_NAME);
+            HGSL_DEV_NUM,
+            HGSL_DEVICE_NAME);
     if (ret < 0) {
         dev_err(&pdev->dev, "alloc_chrdev_region failed %d\n", ret);
         return ret;
@@ -3822,9 +3783,9 @@ static int qcom_hgsl_register(struct platform_device *pdev,
     }
 
     hgsl_dev->class_dev = device_create(hgsl_dev->driver_class,
-                    NULL,
-                    hgsl_dev->device_no,
-                    hgsl_dev, HGSL_DEVICE_NAME);
+            NULL,
+            hgsl_dev->device_no,
+            hgsl_dev, HGSL_DEVICE_NAME);
 
     if (IS_ERR(hgsl_dev->class_dev)) {
         dev_err(&pdev->dev, "class_device_create failed %d\n", ret);
@@ -3837,8 +3798,8 @@ static int qcom_hgsl_register(struct platform_device *pdev,
     hgsl_dev->cdev.owner = THIS_MODULE;
 
     ret = cdev_add(&hgsl_dev->cdev,
-                    MKDEV(MAJOR(hgsl_dev->device_no), 0),
-                    1);
+            MKDEV(MAJOR(hgsl_dev->device_no), 0),
+            1);
     if (ret < 0) {
         dev_err(&pdev->dev, "cdev_add failed %d\n", ret);
         goto exit_destroy_device;
@@ -3882,7 +3843,7 @@ static bool hgsl_is_db_off(struct platform_device *pdev)
 }
 
 static int hgsl_reg_map(struct platform_device *pdev,
-            char *res_name, struct reg *reg)
+        char *res_name, struct reg *reg)
 {
     struct resource *res;
     int ret = 0;
@@ -3893,17 +3854,17 @@ static int hgsl_reg_map(struct platform_device *pdev,
     }
 
     res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-                        res_name);
+            res_name);
     if (res == NULL) {
         dev_err(&pdev->dev, "get resource :%s failed\n",
-                                res_name);
+                res_name);
         ret = -EINVAL;
         goto exit;
     }
 
     if (res->start == 0 || resource_size(res) == 0) {
         dev_err(&pdev->dev, "Register region %s is invalid\n",
-                                res_name);
+                res_name);
         ret = -EINVAL;
         goto exit;
     }
@@ -3911,19 +3872,19 @@ static int hgsl_reg_map(struct platform_device *pdev,
     reg->paddr = res->start;
     reg->size = resource_size(res);
     if (devm_request_mem_region(&pdev->dev,
-                    reg->paddr, reg->size,
-                    res_name) == NULL) {
+                reg->paddr, reg->size,
+                res_name) == NULL) {
         dev_err(&pdev->dev, "request_mem_region  for %s failed\n",
-                                res_name);
+                res_name);
         ret = -ENODEV;
         goto exit;
     }
 
     reg->vaddr = devm_ioremap(&pdev->dev, res->start,
-                        resource_size(res));
+            resource_size(res));
     if (reg->vaddr == NULL) {
         dev_err(&pdev->dev, "Unable to remap %s registers\n",
-                                res_name);
+                res_name);
         ret = -ENODEV;
         goto exit;
     }
@@ -3954,7 +3915,7 @@ static int hgsl_resume(struct device *dev)
             tcsr = hgsl->tcsr[tcsr_idx][HGSL_TCSR_ROLE_RECEIVER];
             if (tcsr != NULL) {
                 hgsl_tcsr_irq_enable(tcsr,
-                    GLB_DB_DEST_TS_RETIRE_IRQ_MASK, true);
+                        GLB_DB_DEST_TS_RETIRE_IRQ_MASK, true);
             }
         }
 
@@ -3963,7 +3924,7 @@ static int hgsl_resume(struct device *dev)
             gmugos = &hgsl->gmugos[i];
             for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++)
                 hgsl_gmugos_irq_enable(&gmugos->irq[j],
-                    GMUGOS_IRQ_MASK);
+                        GMUGOS_IRQ_MASK);
         }
         mutex_unlock(&hgsl->mutex);
 
@@ -3998,14 +3959,14 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
     ret = qcom_hgsl_register(pdev, hgsl_dev);
     if (ret < 0) {
         dev_err(&pdev->dev, "qcom_hgsl_register failed, ret %d\n",
-                                    ret);
+                ret);
         return ret;
     }
 
     ret = hgsl_init_context(hgsl_dev);
     if (ret < 0) {
         dev_err(&pdev->dev, "hgsl_init_context failed, ret %d\n",
-                                    ret);
+                ret);
         goto exit_dereg;
     }
 
@@ -4017,7 +3978,7 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
     ret = hgsl_init_release_wq(hgsl_dev);
     if (ret < 0) {
         dev_err(&pdev->dev, "hgsl_init_release_wq failed, ret %d\n",
-                                    ret);
+                ret);
         goto exit_dereg;
     }
 
@@ -4034,7 +3995,7 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
         hgsl_init_global_hyp_channel(hgsl_dev);
 
     hgsl_dev->default_iocoherency = of_property_read_bool(pdev->dev.of_node,
-                            "default_iocoherency");
+            "default_iocoherency");
     platform_set_drvdata(pdev, hgsl_dev);
     hgsl_sysfs_init(pdev);
     hgsl_debugfs_init(pdev);
