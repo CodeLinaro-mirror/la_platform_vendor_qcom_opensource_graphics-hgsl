@@ -18,7 +18,7 @@ void hgsl_debugfs_release(struct platform_device *pdev);
 #else
 static int hgsl_debugfs_client_init(struct hgsl_priv *priv)
 {
-    return 0;
+	return 0;
 }
 
 void hgsl_debugfs_client_release(struct hgsl_priv *priv)

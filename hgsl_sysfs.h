@@ -17,7 +17,7 @@ void hgsl_sysfs_release(struct platform_device *pdev);
 #else
 int hgsl_sysfs_client_init(struct hgsl_priv *priv)
 {
-    return 0;
+	return 0;
 }
 
 void hgsl_sysfs_client_release(struct hgsl_priv *priv)
@@ -25,7 +25,7 @@ void hgsl_sysfs_client_release(struct hgsl_priv *priv)
 }
 int hgsl_sysfs_init(struct platform_device *pdev)
 {
-    return 0;
+	return 0;
 }
 void hgsl_sysfs_release(struct platform_device *pdev)
 {
