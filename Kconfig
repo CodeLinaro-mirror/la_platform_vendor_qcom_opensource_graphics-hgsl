@@ -20,3 +20,15 @@ config QCOM_HGSL_TCSR_SIGNAL
 	  in hypervisor Linux a way to send/receive signals
 	  to/from A6x GPU hardware directly, without going
 	  through host system.
+
+config DEBUG_FV
+	tristate "Enable debug prints related to FV on Hypervisor GSL"
+	depends on QCOM_HGSL
+	help
+	  Enable this option to turn on verbose debug logging related to GPU full
+	  virtualization (FV) feature in the Hypervisor Graphics System Layer (HGSL)
+	  driver. When enabled, the driver will emit detailed logs related to
+	  initialization, feature negotiation, and runtime behavior of FV-specific
+	  paths, such as IPCQ setup, SID/CB mapping, and feature flag handling.
+	  This is useful for developers working on or debugging FV support in
+	  hypervisor-based environment.

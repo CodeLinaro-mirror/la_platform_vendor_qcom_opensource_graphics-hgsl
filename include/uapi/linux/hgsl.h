@@ -812,5 +812,30 @@ struct hgsl_gpu_aux_command {
 #define HGSL_IOCTL_GPU_AUX_COMMAND \
 				HGSL_IORW(0x1F, struct hgsl_gpu_aux_command)
 
- #endif /* _UAPI_MSM_HGSL_H */
- 
+/**
+ * struct hgsl_ioctl_device_open - get device handle
+ * @device_id: Give hint to backend which GPU, application wants to open
+ * @flags: Flags passed by application to backend for device open
+ * @ret_value: Contains user space device handle variable address.and HGSL will update with the
+ * device handle returned from backend i.e. which GPU, the application is allowed to use.
+ */
+struct hgsl_ioctl_device_open_params {
+	__s32 device_id;
+	__u32 flags;
+	__u64 ret_value;
+};
+#define HGSL_IOCTL_DEVICE_OPEN \
+				HGSL_IOW(0x06, struct hgsl_ioctl_device_open_params)
+
+/**
+ * struct hgsl_ioctl_activate_device - get active device handle
+ * @devhandle: Device handle which application wants to activate.
+ */
+struct hgsl_ioctl_activate_device_params {
+	__u32 devhandle;
+	__u32 padding;
+};
+#define HGSL_IOCTL_ACTIVATE_DEVICE \
+				HGSL_IOW(0x07, struct hgsl_ioctl_activate_device_params)
+
+#endif /* _UAPI_MSM_HGSL_H */

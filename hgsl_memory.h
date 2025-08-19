@@ -14,33 +14,33 @@
 #include "hgsl_types.h"
 #include "hgsl_utils.h"
 
-#define GSL_MEMTYPE_MASK		0x0000FF00
-#define GSL_MEMTYPE_SHIFT			8
+#define GSL_MEMTYPE_MASK        0x0000FF00
+#define GSL_MEMTYPE_SHIFT           8
 #define GET_MEMTYPE(x) \
-	((x & GSL_MEMTYPE_MASK) >> GSL_MEMTYPE_SHIFT)
-#define GSL_MEMTYPE_OBJECTANY			0x0
-#define GSL_MEMTYPE_FRAMEBUFFER			0x1
-#define GSL_MEMTYPE_RENDERBUFFER		0x2
-#define GSL_MEMTYPE_ARRAYBUFFER			0x3
-#define GSL_MEMTYPE_ELEMENTARRAYBUFFER		0x4
-#define GSL_MEMTYPE_VERTEXARRAYBUFFER		0x5
-#define GSL_MEMTYPE_TEXTURE			0x6
-#define GSL_MEMTYPE_SURFACE			0x7
-#define GSL_MEMTYPE_EGL_SURFACE			0x8
-#define GSL_MEMTYPE_GL				0x9
-#define GSL_MEMTYPE_CL				0xa
-#define GSL_MEMTYPE_CL_BUFFER_MAP		0xb
-#define GSL_MEMTYPE_CL_BUFFER_NOMAP		0xc
-#define GSL_MEMTYPE_CL_IMAGE_MAP		0xd
-#define GSL_MEMTYPE_CL_IMAGE_NOMAP		0xe
-#define GSL_MEMTYPE_CL_KERNEL_STACK		0xf
-#define GSL_MEMTYPE_COMMAND			0x10
-#define GSL_MEMTYPE_2D				0x11
-#define GSL_MEMTYPE_EGL_IMAGE			0x12
-#define GSL_MEMTYPE_EGL_SHADOW			0x13
-#define GSL_MEMTYPE_MULTISAMPLE			0x14
-#define GSL_MEMTYPE_VISIBLE_MAS			0x15
-#define GSL_MEMTYPE_KERNEL			0xff
+    ((x & GSL_MEMTYPE_MASK) >> GSL_MEMTYPE_SHIFT)
+#define GSL_MEMTYPE_OBJECTANY           0x0
+#define GSL_MEMTYPE_FRAMEBUFFER         0x1
+#define GSL_MEMTYPE_RENDERBUFFER        0x2
+#define GSL_MEMTYPE_ARRAYBUFFER         0x3
+#define GSL_MEMTYPE_ELEMENTARRAYBUFFER      0x4
+#define GSL_MEMTYPE_VERTEXARRAYBUFFER       0x5
+#define GSL_MEMTYPE_TEXTURE         0x6
+#define GSL_MEMTYPE_SURFACE         0x7
+#define GSL_MEMTYPE_EGL_SURFACE         0x8
+#define GSL_MEMTYPE_GL              0x9
+#define GSL_MEMTYPE_CL              0xa
+#define GSL_MEMTYPE_CL_BUFFER_MAP       0xb
+#define GSL_MEMTYPE_CL_BUFFER_NOMAP     0xc
+#define GSL_MEMTYPE_CL_IMAGE_MAP        0xd
+#define GSL_MEMTYPE_CL_IMAGE_NOMAP      0xe
+#define GSL_MEMTYPE_CL_KERNEL_STACK     0xf
+#define GSL_MEMTYPE_COMMAND         0x10
+#define GSL_MEMTYPE_2D              0x11
+#define GSL_MEMTYPE_EGL_IMAGE           0x12
+#define GSL_MEMTYPE_EGL_SHADOW          0x13
+#define GSL_MEMTYPE_MULTISAMPLE         0x14
+#define GSL_MEMTYPE_VISIBLE_MAS         0x15
+#define GSL_MEMTYPE_KERNEL          0xff
 #define HGSL_MEM_META_MAX_SIZE         128
 enum gsl_user_mem_type_t {
 	GSL_USER_MEM_TYPE_PMEM         = 0x00000000,
@@ -52,6 +52,18 @@ enum gsl_user_mem_type_t {
 struct hgsl_cache_flags {
 	bool default_iocoherency;
 	bool writecombine_enable;
+};
+
+struct hgsl_mem_node_iommu_info {
+	int32_t                   fd;
+	struct sg_table           *sgt_iommu;
+	atomic_t                  sgt_iommu_refcount;
+	uint32_t                  iommu_mask;
+	uint32_t                  priv;
+	struct hgsl_pagetable     *pagetable;
+	struct hgsl_priv          *ptr_hgsl_priv;
+	struct dma_buf            *dma_buf_iommu;
+	struct dma_buf_attachment *attach_iommu;
 };
 
 struct hgsl_mem_node {
@@ -72,6 +84,7 @@ struct hgsl_mem_node {
 	uint32_t                  vmap_count;
 	uint32_t                  flags;
 	struct hgsl_cache_flags   cache_flags;
+	struct hgsl_mem_node_iommu_info mem_node_iommu_info;
 	char                      metainfo[HGSL_MEM_META_MAX_SIZE];
 };
 
@@ -101,5 +114,8 @@ static inline bool hgsl_mem_range_inspect(uint64_t da1, uint64_t da2,
 	else
 		return ((da1 <= da2) && (da1 + size1) >= (da2 + size2));
 }
+
+struct sg_table *hgsl_get_sgt_iommu(struct device *dev, struct hgsl_mem_node *mem_node);
+void hgsl_put_sgt_iommu(struct hgsl_mem_node *mem_node);
 
 #endif
