@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <asm/unistd.h>
@@ -31,7 +31,6 @@
 #define HGSL_DEVICE_NAME "hgsl"
 #define HGSL_DEV_NUM 1
 
-#define IORESOURCE_HWINF "hgsl_reg_hwinf"
 #define IORESOURCE_GMUCX "hgsl_reg_gmucx"
 
 /* Set-up profiling packets as needed by scope */
@@ -398,22 +397,6 @@ static inline void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delt
 
 static int hgsl_reg_map(struct platform_device *pdev,
             char *res_name, struct reg *reg);
-
-static void hgsl_reg_read(struct reg *reg, unsigned int off,
-                    unsigned int *value)
-{
-    if (reg == NULL)
-        return;
-
-    if (WARN(off > reg->size,
-        "Invalid reg read:0x%x, reg size:0x%x\n",
-                        off, reg->size))
-        return;
-    *value = __raw_readl(reg->vaddr + off);
-
-    /* ensure this read finishes before the next one.*/
-    dma_rmb();
-}
 
 static void hgsl_reg_write(struct reg *reg, unsigned int off,
                     unsigned int value)
@@ -3505,42 +3488,6 @@ static int hgsl_release(struct inode *inodep, struct file *filep)
     return 0;
 }
 
-static ssize_t hgsl_read(struct file *filep, char __user *buf, size_t count,
-        loff_t *pos)
-{
-    struct hgsl_priv *priv = filep->private_data;
-    struct qcom_hgsl *hgsl = priv->dev;
-    struct platform_device *pdev = to_platform_device(hgsl->dev);
-    uint32_t version = 0;
-    uint32_t release = 0;
-    char buff[100];
-    int ret = 0;
-
-    if (!hgsl->db_off) {
-        if (hgsl->reg_ver.vaddr == NULL) {
-            ret = hgsl_reg_map(pdev, IORESOURCE_HWINF, &hgsl->reg_ver);
-            if (ret < 0) {
-                dev_err(hgsl->dev, "Unable to map resource:%s\n",
-                        IORESOURCE_HWINF);
-            }
-        }
-
-        if (hgsl->reg_ver.vaddr != NULL) {
-            hgsl_reg_read(&hgsl->reg_ver, 0, &version);
-            hgsl_reg_read(&hgsl->reg_ver, 4, &release);
-            snprintf(buff, 100, "gpu HW Version:%x HW Release:%x\n",
-                                version, release);
-        } else {
-            snprintf(buff, 100, "Unable to read HW version\n");
-        }
-    } else {
-        snprintf(buff, 100, "Doorbell closed\n");
-    }
-
-    return simple_read_from_buffer(buf, count, pos,
-            buff, strlen(buff) + 1);
-}
-
 static int hgsl_ioctl_hsync_fence_create(
     struct file *filep,
     void *data)
@@ -3850,7 +3797,6 @@ static const struct file_operations hgsl_fops = {
     .owner = THIS_MODULE,
     .open = hgsl_open,
     .release = hgsl_release,
-    .read = hgsl_read,
     .unlocked_ioctl = hgsl_ioctl,
     .compat_ioctl = hgsl_compat_ioctl
 };
@@ -4000,6 +3946,8 @@ static int hgsl_resume(struct device *dev)
     struct qcom_hgsl *hgsl = platform_get_drvdata(pdev);
     struct hgsl_tcsr *tcsr = NULL;
     int tcsr_idx = 0;
+    struct hgsl_gmugos *gmugos;
+    int i, j;
 
     if (pm_suspend_target_state == PM_SUSPEND_MEM) {
         for (tcsr_idx = 0; tcsr_idx < HGSL_TCSR_NUM; tcsr_idx++) {
@@ -4009,6 +3957,16 @@ static int hgsl_resume(struct device *dev)
                     GLB_DB_DEST_TS_RETIRE_IRQ_MASK, true);
             }
         }
+
+        mutex_lock(&hgsl->mutex);
+        for (i = 0; i < HGSL_DEVICE_NUM; i++) {
+            gmugos = &hgsl->gmugos[i];
+            for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++)
+                hgsl_gmugos_irq_enable(&gmugos->irq[j],
+                    GMUGOS_IRQ_MASK);
+        }
+        mutex_unlock(&hgsl->mutex);
+
         /*
          * There could be a scenario when GVM submit some work to GMU
          * just before going to suspend, in this case, the GMU will
@@ -4115,10 +4073,8 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
     mutex_lock(&hgsl->mutex);
     for (i = 0; i < HGSL_DEVICE_NUM; i++) {
         gmugos = &hgsl->gmugos[i];
-        for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++) {
-            hgsl_gmugos_irq_disable(&gmugos->irq[j], GMUGOS_IRQ_MASK);
+        for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++)
             hgsl_gmugos_irq_free(&gmugos->irq[j]);
-        }
     }
     mutex_unlock(&hgsl->mutex);
 

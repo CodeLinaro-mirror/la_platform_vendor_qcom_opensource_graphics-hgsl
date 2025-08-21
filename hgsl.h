@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #ifndef __HGSL_H_
@@ -134,7 +134,6 @@ struct qcom_hgsl {
     struct device *class_dev;
 
     /* registers mapping */
-    struct reg reg_ver;
     struct reg reg_dbidx;
 
     struct doorbell_queue dbq[MAX_DB_QUEUE];

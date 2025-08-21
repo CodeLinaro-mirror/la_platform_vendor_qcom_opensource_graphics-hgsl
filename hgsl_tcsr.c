@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -19,9 +19,9 @@
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/platform_device.h>
-#include <linux/regmap.h>
 
 #include "hgsl_tcsr.h"
+#include "hgsl_utils.h"
 
 /* Sender registers */
 #define TCSR_GLB_CFG_COMPUTE_SIGNALING_REG	0x000
@@ -52,8 +52,8 @@ static irqreturn_t hgsl_tcsr_isr(int irq, void *ptr)
     struct hgsl_tcsr *tcsr = ptr;
     u32 status;
 
-    regmap_read(tcsr->regmap, TCSR_COMPUTE_SIGNAL_STATUS_REG, &status);
-    regmap_write(tcsr->regmap, TCSR_COMPUTE_SIGNAL_CLEAR_REG, status);
+    status = hgsl_regmap_read(tcsr->regmap, TCSR_COMPUTE_SIGNAL_STATUS_REG);
+    hgsl_regmap_write(tcsr->regmap, TCSR_COMPUTE_SIGNAL_CLEAR_REG, status);
 
     if (tcsr->isr)
         return tcsr->isr(tcsr->client_dev, status);
@@ -214,19 +214,19 @@ void hgsl_tcsr_irq_trigger(struct hgsl_tcsr *tcsr, int irq_id)
      * Read back this global config register in case
      * it has been modified by others.
      */
-    regmap_read(tcsr->glb_regmap,
-            TCSR_GLB_CFG_COMPUTE_SIGNALING_REG, &reg);
+    reg = hgsl_regmap_read(tcsr->glb_regmap,
+            TCSR_GLB_CFG_COMPUTE_SIGNALING_REG);
     reg = irq_id << reg;
-    regmap_write(tcsr->regmap, TCSR_COMPUTE_SIGNALING_REG, reg);
+    hgsl_regmap_write(tcsr->regmap, TCSR_COMPUTE_SIGNALING_REG, reg);
 }
 
 void hgsl_tcsr_irq_enable(struct hgsl_tcsr *tcsr, u32 mask, bool enable)
 {
     u32 reg;
 
-    regmap_read(tcsr->regmap, TCSR_COMPUTE_SIGNAL_MASK_REG, &reg);
+    reg = hgsl_regmap_read(tcsr->regmap, TCSR_COMPUTE_SIGNAL_MASK_REG);
     reg = enable ? (reg | mask) : (reg & ~mask);
-    regmap_write(tcsr->regmap, TCSR_COMPUTE_SIGNAL_MASK_REG, reg);
+    hgsl_regmap_write(tcsr->regmap, TCSR_COMPUTE_SIGNAL_MASK_REG, reg);
 }
 #endif
 
