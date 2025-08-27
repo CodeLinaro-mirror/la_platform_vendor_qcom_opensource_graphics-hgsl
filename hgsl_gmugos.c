@@ -144,7 +144,7 @@ int hgsl_init_gmugos(struct platform_device *pdev,
 	struct qcom_hgsl *hgsl = platform_get_drvdata(pdev);
 	struct hgsl_gmugos *gmugos;
 	struct hgsl_gmugos_irq *gmugos_irq;
-	char irq_name[HGSL_GMUGOS_NAME_LEN];
+	char *name;
 	int ret = 0;
 	u32 dev_id = hgsl_hnd2id(ctxt->devhandle);
 
@@ -170,14 +170,15 @@ int hgsl_init_gmugos(struct platform_device *pdev,
 	if (gmugos_irq->num)
 		goto out;
 
-	snprintf(irq_name, sizeof(irq_name), "hgsl_gmugos%u_irq%u",
+	name = gmugos_irq->name;
+	snprintf(name, sizeof(gmugos_irq->name), "hgsl_gmugos%u_irq%u",
 			dev_id, irq_idx);
 
-	ret = hgsl_gmugos_request_irq(pdev, irq_name, hgsl_gmugos_isr,
+	ret = hgsl_gmugos_request_irq(pdev, name, hgsl_gmugos_isr,
 				hgsl_gmugos_ts_retire, gmugos_irq);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "failed to request gmugos irq %s, irq %u\n",
-			irq_name, ret);
+			name, ret);
 		goto out;
 	}
 	gmugos_irq->id = irq_idx;

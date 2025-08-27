@@ -17,6 +17,7 @@
 #define GMUGOS_IRQ_MASK TCSR_DEST_IRQ_MASK_0
 
 struct hgsl_gmugos_irq {
+	char name[HGSL_GMUGOS_NAME_LEN];
 	struct regmap *regmap;
 	u32 id;
 	s32 num;
