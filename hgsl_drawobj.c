@@ -97,7 +97,9 @@ static void syncobj_timer(struct timer_list *t)
 	struct hgsl_drawobj_sync *syncobj = from_timer(syncobj, t, timer);
 	struct hgsl_drawobj *drawobj;
 	struct hgsl_drawobj_sync_event *event;
+	struct hgsl_context *ctxt;
 	unsigned int i;
+	u32 rts = 0;
 
 	drawobj = DRAWOBJ(syncobj);
 	if (!kref_get_unless_zero(&drawobj->refcount))
@@ -108,8 +110,12 @@ static void syncobj_timer(struct timer_list *t)
 		return;
 	}
 
-	LOGE("hgsl: possible gpu syncpoint deadlock for context %u timestamp %u\n",
-		drawobj->context->context_id, drawobj->timestamp);
+	ctxt = drawobj->context;
+	if (ctxt->shadow_ts)
+		rts = get_context_retired_ts(ctxt);
+
+	LOGE("hgsl: possible gpu syncpoint deadlock for context %u timestamp %u retired %u queued %u\n",
+		ctxt->context_id, drawobj->timestamp, rts, ctxt->queued_ts);
 	LOGE("      pending events:\n");
 	for (i = 0; i < syncobj->numsyncs; i++) {
 		event = &syncobj->synclist[i];

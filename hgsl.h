@@ -200,7 +200,7 @@ struct hgsl_event {
 	hgsl_event_func func;
 	void *priv;
 	struct list_head node;
-	u32 created;
+	u64 created;
 	struct kthread_work work;
 	int result;
 	struct hgsl_event_group *group;
@@ -307,6 +307,9 @@ struct qcom_hgsl {
 	struct dentry *debugfs;
 	struct dentry *clients_debugfs;
 	struct dentry *debugfs_stat;
+	struct mutex destroying_ctx_list_lock;
+	struct list_head destroying_ctx_list;
+
 	/* HFI message queues */
 	void *PKMD2HGSL_queue[HGSL_DEVICE_NUM];
 	void *GMU2HGSL_queue[HGSL_DEVICE_NUM];
@@ -365,6 +368,7 @@ struct hgsl_context {
 	struct hgsl_event_group event_group;
 
 	struct hgsl_mem_node *ctxt_record_mem_node;
+	struct list_head node;
 };
 
 struct hgsl_priv {

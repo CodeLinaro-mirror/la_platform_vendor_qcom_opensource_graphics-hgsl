@@ -104,7 +104,7 @@ static int _retire_syncobj(struct qcom_hgsl *hgsl,
 	 */
 	if (!syncobj->timeout_jiffies) {
 		syncobj->timeout_jiffies = jiffies + msecs_to_jiffies(5000);
-			mod_timer(&syncobj->timer, syncobj->timeout_jiffies);
+		mod_timer(&syncobj->timer, syncobj->timeout_jiffies);
 	}
 
 	return 1;

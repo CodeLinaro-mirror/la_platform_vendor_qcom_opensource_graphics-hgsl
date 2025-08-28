@@ -15,6 +15,51 @@
 
 #include <linux/tracepoint.h>
 
+#include "hgsl_drawobj.h"
+
+DECLARE_EVENT_CLASS(hgsl_hsync_class,
+	TP_PROTO(struct hgsl_hsync_fence *hsync),
+	TP_ARGS(hsync),
+	TP_STRUCT__entry(
+		__string(tl_name, hsync->timeline->name)
+		__field(u32, devhandle)
+		__field(u32, context_id)
+		__field(u32, ts)
+		__field(u32, last_ts)
+	),
+	TP_fast_assign(
+		__assign_str(tl_name);
+		__entry->devhandle = hsync->timeline->context->devhandle;
+		__entry->context_id = hsync->timeline->context->context_id;
+		__entry->ts = hsync->ts;
+		__entry->last_ts = hsync->timeline->last_ts;
+	),
+	TP_printk("ctx=[%u:%u] ts=%u last_ts=%u timeline=%s",
+			__entry->devhandle, __entry->context_id,
+			__entry->ts, __entry->last_ts, __get_str(tl_name)
+	)
+);
+
+DEFINE_EVENT(hgsl_hsync_class, hsync_fence_create,
+	TP_PROTO(struct hgsl_hsync_fence *hsync),
+	TP_ARGS(hsync)
+);
+
+DEFINE_EVENT(hgsl_hsync_class, hsync_fence_signal,
+	TP_PROTO(struct hgsl_hsync_fence *hsync),
+	TP_ARGS(hsync)
+);
+
+DEFINE_EVENT(hgsl_hsync_class, hsync_fence_release_unsignal,
+	TP_PROTO(struct hgsl_hsync_fence *hsync),
+	TP_ARGS(hsync)
+);
+
+DEFINE_EVENT(hgsl_hsync_class, hsync_fence_release,
+	TP_PROTO(struct hgsl_hsync_fence *hsync),
+	TP_ARGS(hsync)
+);
+
 TRACE_EVENT(isync_release,
 	TP_PROTO(
 		u32 id
@@ -127,17 +172,20 @@ DECLARE_EVENT_CLASS(hgsl_drawobj_class,
 		__field(u32, devhandle)
 		__field(u32, context_id)
 		__field(u32, refcount)
+		__field(u32, type)
 		__field(u32, timestamp)
 	),
 	TP_fast_assign(
 		__entry->devhandle = drawobj->context->devhandle;
 		__entry->context_id = drawobj->context->context_id;
 		__entry->refcount = kref_read(&drawobj->context->kref);
+		__entry->type = drawobj->type;
 		__entry->timestamp = drawobj->timestamp;
 	),
-	TP_printk("ctx=[%u:%u] refcount=%u timestamp=%u",
+	TP_printk("ctx=[%u:%u] refcount=%u type=%u timestamp=%u",
 		__entry->devhandle, __entry->context_id,
-		__entry->refcount, __entry->timestamp)
+		__entry->refcount, __entry->type,
+		__entry->timestamp)
 );
 
 DEFINE_EVENT(hgsl_drawobj_class, drawobj_submitted,
@@ -252,6 +300,39 @@ DEFINE_EVENT(syncpoint_fence_class, syncpoint_fence,
 DEFINE_EVENT(syncpoint_fence_class, syncpoint_fence_expire,
 	TP_PROTO(struct hgsl_drawobj_sync *syncobj, char *name),
 	TP_ARGS(syncobj, name)
+);
+
+DECLARE_EVENT_CLASS(event_class,
+	TP_PROTO(struct hgsl_event *event),
+	TP_ARGS(event),
+	TP_STRUCT__entry(
+		__field(u32, devhandle)
+		__field(u32, context_id)
+		__field(u32, timestamp)
+		__field(u64, created)
+		__field(int, result)
+	),
+	TP_fast_assign(
+		__entry->devhandle = event->context->devhandle;
+		__entry->context_id = event->context->context_id;
+		__entry->timestamp = event->timestamp;
+		__entry->created = event->created;
+		__entry->result = event->result;
+	),
+	TP_printk("ctx=[%u:%u] ts=%u age=%lums result=%d",
+		__entry->devhandle, __entry->context_id, __entry->timestamp,
+		jiffies_to_msecs(get_jiffies_64() - __entry->created),
+		__entry->result)
+);
+
+DEFINE_EVENT(event_class, retire_event_signal,
+	TP_PROTO(struct hgsl_event *event),
+	TP_ARGS(event)
+);
+
+DEFINE_EVENT(event_class, retire_event_cbfunc,
+	TP_PROTO(struct hgsl_event *event),
+	TP_ARGS(event)
 );
 
 DECLARE_EVENT_CLASS(hgsl_ctxt_class,

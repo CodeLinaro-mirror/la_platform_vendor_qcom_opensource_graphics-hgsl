@@ -1894,6 +1894,12 @@ static struct hgsl_context *hgsl_remove_context(struct hgsl_priv *priv,
 		ctxt = NULL;
 	write_unlock(&hgsl->ctxt_lock);
 
+	if (ctxt) {
+		mutex_lock(&hgsl->destroying_ctx_list_lock);
+		list_add_tail(&ctxt->node, &hgsl->destroying_ctx_list);
+		mutex_unlock(&hgsl->destroying_ctx_list_lock);
+	}
+
 	return ctxt;
 }
 
@@ -2242,6 +2248,10 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 
 	while (!ctxt->destroyed)
 		cpu_relax();
+
+	mutex_lock(&hgsl->destroying_ctx_list_lock);
+	list_del_init(&ctxt->node);
+	mutex_unlock(&hgsl->destroying_ctx_list_lock);
 
 	hgsl_dispatch_ctxt_deinit(hgsl, ctxt);
 
@@ -5088,8 +5098,9 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 	}
 
 	INIT_LIST_HEAD(&hgsl_dev->active_list);
-
 	INIT_LIST_HEAD(&hgsl_dev->active_wait_list);
+	INIT_LIST_HEAD(&hgsl_dev->destroying_ctx_list);
+	mutex_init(&hgsl_dev->destroying_ctx_list_lock);
 	spin_lock_init(&hgsl_dev->active_wait_lock);
 
 	ret = hgsl_init_release_wq(hgsl_dev);
