@@ -7,6 +7,7 @@
 #include <linux/spinlock.h>
 
 #include "hgsl.h"
+#include "hgsl_trace.h"
 #include "hgsl_dispatch.h"
 
 /**
@@ -31,6 +32,8 @@ static inline void signal_event(struct hgsl_event *event, int result)
 {
 	list_del(&event->node);
 	event->result = result;
+
+	trace_retire_event_signal(event);
 	kthread_queue_work(event->hgsl->events_worker, &event->work);
 }
 
@@ -47,6 +50,7 @@ static void _hgsl_event_worker(struct kthread_work *work)
 
 	event->func(event->hgsl, event->group, event->priv, event->result);
 
+	trace_retire_event_cbfunc(event);
 	hgsl_put_context(event->context);
 	kmem_cache_free(events_cache, event);
 }
@@ -207,7 +211,7 @@ int hgsl_add_event(struct hgsl_priv *hgsl_priv, struct hgsl_event_group *group,
 	event->timestamp = timestamp;
 	event->priv = priv;
 	event->func = func;
-	event->created = jiffies;
+	event->created = get_jiffies_64();
 	event->group = group;
 
 	kthread_init_work(&event->work, _hgsl_event_worker);
