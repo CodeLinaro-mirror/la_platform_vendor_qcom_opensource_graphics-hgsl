@@ -108,11 +108,14 @@
 /* device id */
 /*************/
 enum gsl_deviceid_t {
-	GSL_DEVICE_UNUSED = -1,	/* gcc compiler warning fix, unsigned->signed */
+	GSL_DEVICE_UNUSED = -1, /* gcc compiler warning fix, unsigned->signed */
 	GSL_DEVICE_ANY    = 0,
 	GSL_DEVICE_3D     = 1,
-	GSL_DEVICE_0      = 2,
-	GSL_DEVICE_1      = 3,
+	GSL_DEVICE_2DVG   = 2,
+	GSL_DEVICE_2DVG_1 = 3,
+	GSL_DEVICE_0      = 4,
+	GSL_DEVICE_1      = 5,
+	GSL_DEVICE_MAX    = 5,
 
 	GSL_DEVICE_FOOBAR = 0x7FFFFFFF
 };
@@ -128,33 +131,33 @@ enum gsl_devhandle_t {
 /****************************/
 struct gsl_memdesc_t {
 	union {
-		void         *hostptr;
-		uint64_t     hostptr64;
+		void            *hostptr;
+		uint64_t        hostptr64;
 	};
-	uint64_t             gpuaddr;
+	uint64_t            gpuaddr;
 	union {
-		unsigned int size;
-		uint64_t     size64;
+		unsigned int    size;
+		uint64_t        size64;
 	};
-	uint64_t             flags;
+	uint64_t            flags;
 	union {
-		uintptr_t    priv;
-		uint64_t     priv64;
+		uintptr_t       priv;
+		uint64_t        priv64;
 	};
 };
 
 struct gsl_command_buffer_object_t {
-	struct gsl_memdesc_t		*memdesc;
-	uint64_t			sizedwords;
-	uint64_t			offset;
-	uint64_t			flags;
+	struct gsl_memdesc_t        *memdesc;
+	uint64_t            sizedwords;
+	uint64_t            offset;
+	uint64_t            flags;
 };
 
 struct gsl_memory_object_t {
-	struct gsl_memdesc_t		*memdesc;
-	uint64_t			sizedwords;
-	uint64_t			offset;
-	uint64_t			flags;
+	struct gsl_memdesc_t        *memdesc;
+	uint64_t            sizedwords;
+	uint64_t            offset;
+	uint64_t            flags;
 };
 
 /****************/
@@ -171,9 +174,9 @@ enum gsl_timestamp_type_t {
 
 enum gsl_context_type_t {
 	GSL_CONTEXT_TYPE_GENERIC = 1,
-	GSL_CONTEXT_TYPE_OPENGL	 = 2,
-	GSL_CONTEXT_TYPE_OPENVG	 = 3,
-	GSL_CONTEXT_TYPE_OPENCL	 = 4,
+	GSL_CONTEXT_TYPE_OPENGL  = 2,
+	GSL_CONTEXT_TYPE_OPENVG  = 3,
+	GSL_CONTEXT_TYPE_OPENCL  = 4,
 	GSL_CONTEXT_TYPE_C2D     = 5,
 	GSL_CONTEXT_TYPE_RS      = 6,
 	GSL_CONTEXT_TYPE_DX      = 7,
@@ -228,8 +231,8 @@ enum gsl_perfcountergroupid_t {
 /* system time usage                                                        */
 /****************************************************************************/
 enum gsl_systemtime_usage_t {
-	GSL_SYSTEMTIME_GENERIC		= 0x0,
-	GSL_SYSTEMTIME_CL_PROFILING	= 0x1,
+	GSL_SYSTEMTIME_GENERIC      = 0x0,
+	GSL_SYSTEMTIME_CL_PROFILING = 0x1,
 };
 
-#endif	/* __HGSL_TYPES_H */
+#endif  /* __HGSL_TYPES_H */

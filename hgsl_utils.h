@@ -22,10 +22,19 @@ enum {
 	LOG_LEVEL_NUM
 };
 
+/* Number of the GPU device */
+#define HGSL_DEVICE_NUM  (2)
+
 #define LOGE(...) hgsl_log(LOG_LEVEL_ERROR, __func__, __LINE__, ##__VA_ARGS__)
 #define LOGW(...) hgsl_log(LOG_LEVEL_WARN, __func__, __LINE__, ##__VA_ARGS__)
-#define LOGI(...)
+#define LOGI(...) hgsl_log(LOG_LEVEL_INFO, __func__, __LINE__, ##__VA_ARGS__)
 #define LOGD(...)
+
+#if IS_ENABLED(CONFIG_DEBUG_FV)
+#define DEBUG_HGSL_FV(...) hgsl_log(LOG_LEVEL_INFO, __func__, __LINE__, ##__VA_ARGS__)
+#else
+#define DEBUG_HGSL_FV(...)
+#endif
 
 #define OS_UNUSED(param) ((void)param)
 

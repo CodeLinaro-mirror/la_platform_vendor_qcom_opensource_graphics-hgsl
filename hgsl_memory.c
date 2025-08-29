@@ -9,6 +9,7 @@
 #include <linux/highmem.h>
 #include <linux/fs.h>
 #include <soc/qcom/secure_buffer.h>
+#include "hgsl.h"
 
 #ifndef pgprot_writebackcache
 #define pgprot_writebackcache(_prot)	(_prot)
@@ -109,6 +110,118 @@ static void hgsl_mem_unmap_dma_buf(struct dma_buf_attachment *attachment,
 	hgsl_put_sgt_internal(mem_node);
 }
 
+struct sg_table *hgsl_get_sgt_iommu(struct device *dev, struct hgsl_mem_node *mem_node)
+{
+	struct sg_table *sgt = NULL;
+	struct hgsl_mem_node_iommu_info *p_mem_node_iommu_info = NULL;
+
+	if (!mem_node || !dev) {
+		LOGW("Invalid mem_node or dev!!!");
+		goto err;
+	}
+
+	p_mem_node_iommu_info = &(mem_node->mem_node_iommu_info);
+
+	if (!IS_ERR_OR_NULL(p_mem_node_iommu_info->sgt_iommu)) {
+		sgt = p_mem_node_iommu_info->sgt_iommu;
+		atomic_inc(&p_mem_node_iommu_info->sgt_iommu_refcount);
+		goto out;
+	}
+
+	if (mem_node->dma_buf) {
+		get_dma_buf(mem_node->dma_buf);
+		p_mem_node_iommu_info->dma_buf_iommu = mem_node->dma_buf;
+	} else {
+		if (mem_node->fd < 0) {
+			LOGE("Invalid fd!!!");
+			goto err;
+		}
+		p_mem_node_iommu_info->dma_buf_iommu = dma_buf_get(mem_node->fd);
+	}
+
+	if (IS_ERR_OR_NULL(p_mem_node_iommu_info->attach_iommu)) {
+		p_mem_node_iommu_info->attach_iommu =
+				dma_buf_attach(p_mem_node_iommu_info->dma_buf_iommu, dev);
+		if (IS_ERR_OR_NULL(p_mem_node_iommu_info->attach_iommu)) {
+			LOGE("dma_buf_attach() failed");
+			sgt = ERR_PTR(-EINVAL);
+			goto out;
+		}
+	}
+
+	sgt = dma_buf_map_attachment_unlocked(p_mem_node_iommu_info->attach_iommu,
+				DMA_BIDIRECTIONAL);
+	if (IS_ERR_OR_NULL(sgt)) {
+		LOGE("dma_buf_map_attachment_unlocked() failed");
+		sgt = ERR_PTR(-EINVAL);
+		goto out;
+	}
+
+	atomic_set(&p_mem_node_iommu_info->sgt_iommu_refcount, 1);
+	p_mem_node_iommu_info->sgt_iommu = sgt;
+
+out:
+	if (IS_ERR_OR_NULL(sgt)) {
+		if (p_mem_node_iommu_info->attach_iommu) {
+			if (!IS_ERR_OR_NULL(p_mem_node_iommu_info->dma_buf_iommu)) {
+				dma_buf_detach(p_mem_node_iommu_info->dma_buf_iommu,
+						p_mem_node_iommu_info->attach_iommu);
+				p_mem_node_iommu_info->attach_iommu = NULL;
+			} else
+				LOGE("invalid dma_buf");
+		}
+
+		if (!IS_ERR_OR_NULL(p_mem_node_iommu_info->dma_buf_iommu)) {
+			dma_buf_put(p_mem_node_iommu_info->dma_buf_iommu);
+			p_mem_node_iommu_info->dma_buf_iommu = NULL;
+		}
+	}
+
+err:
+	return sgt;
+}
+
+void hgsl_put_sgt_iommu(struct hgsl_mem_node *mem_node)
+{
+	struct hgsl_mem_node_iommu_info *p_mem_node_iommu_info = NULL;
+
+	if (!mem_node) {
+		LOGW("Invalid mem_node!!!");
+		goto out;
+	}
+
+	p_mem_node_iommu_info = &(mem_node->mem_node_iommu_info);
+
+	if (!p_mem_node_iommu_info->sgt_iommu) {
+		LOGW("Invalid sgt_iommu!!!");
+		goto out;
+	}
+
+	if (atomic_dec_and_test(&p_mem_node_iommu_info->sgt_iommu_refcount)) {
+		if (!IS_ERR_OR_NULL(p_mem_node_iommu_info->attach_iommu)) {
+			dma_buf_unmap_attachment_unlocked(p_mem_node_iommu_info->attach_iommu,
+					p_mem_node_iommu_info->sgt_iommu, DMA_BIDIRECTIONAL);
+			p_mem_node_iommu_info->sgt_iommu = NULL;
+
+			if (!IS_ERR_OR_NULL(p_mem_node_iommu_info->dma_buf_iommu)) {
+				dma_buf_detach(p_mem_node_iommu_info->dma_buf_iommu,
+						p_mem_node_iommu_info->attach_iommu);
+				p_mem_node_iommu_info->attach_iommu = NULL;
+			} else
+				LOGE("invalid dma_buf");
+		} else
+			LOGE("invalid attach");
+
+		if (!IS_ERR_OR_NULL(p_mem_node_iommu_info->dma_buf_iommu)) {
+			dma_buf_put(p_mem_node_iommu_info->dma_buf_iommu);
+			p_mem_node_iommu_info->dma_buf_iommu = NULL;
+		}
+	}
+
+out:
+	return;
+}
+
 static int hgsl_mem_mmap(struct dma_buf *dmabuf, struct vm_area_struct *vma)
 {
 	struct hgsl_mem_node *mem_node = dmabuf->priv;
@@ -119,7 +232,7 @@ static int hgsl_mem_mmap(struct dma_buf *dmabuf, struct vm_area_struct *vma)
 	int ret;
 
 	if ((vma == NULL) ||
-	    (mem_node->flags & GSL_MEMFLAGS_PROTECTED))
+		(mem_node->flags & GSL_MEMFLAGS_PROTECTED))
 		return -EINVAL;
 
 	page_count = vma_pages(vma);
@@ -268,9 +381,9 @@ static int hgsl_mem_dma_buf_vmap(struct dma_buf *dmabuf, struct iosys_map *map)
 
 	if (IS_ERR_OR_NULL(mem_node->vmapping))
 		mem_node->vmapping = vmap(mem_node->pages,
-			    mem_node->page_count,
-			    VM_IOREMAP,
-			    prot);
+				mem_node->page_count,
+				VM_IOREMAP,
+				prot);
 
 	if (!IS_ERR_OR_NULL(mem_node->vmapping))
 		mem_node->vmap_count++;
@@ -554,11 +667,25 @@ static int hgsl_export_dma_buf(struct hgsl_mem_node *mem_node)
 int hgsl_sharedmem_alloc(struct device *dev, uint32_t sizebytes,
 	uint32_t flags, struct hgsl_mem_node *mem_node)
 {
-	uint32_t requested_size = PAGE_ALIGN(sizebytes);
-	uint32_t requested_pcount = requested_size >> PAGE_SHIFT;
+	uint32_t requested_size = 0;
+	uint32_t requested_pcount = 0;
 	uint32_t allocated_pcount = 0;
 	uint32_t nents = 0;
 	int ret = 0;
+
+	if (!sizebytes || sizebytes > U32_MAX - PAGE_SIZE) {
+		LOGE("Invalid or too large sizebytes");
+		return -EINVAL;
+	}
+
+	requested_size = PAGE_ALIGN(sizebytes);
+	requested_pcount = requested_size >> PAGE_SHIFT;
+
+	/* Check for overflow after PAGE_ALIGN */
+	if (requested_size < sizebytes) {
+		LOGE("Integer overflow in size calculation");
+		return -EINVAL;
+	}
 
 	mem_node->pages =
 		hgsl_malloc(requested_pcount * sizeof(struct page *));

@@ -19,6 +19,7 @@
 #include "hgsl_memory.h"
 #include "hgsl_tcsr.h"
 #include "hgsl_gmugos.h"
+#include "hgsl_mmu.h"
 
 /*
  * --- kgsl drawobj flags ---
@@ -33,6 +34,14 @@
 #define HGSL_DRAWOBJ_END_OF_FRAME      HGSL_CMDBATCH_END_OF_FRAME
 #define HGSL_DRAWOBJ_SYNC              HGSL_CMDBATCH_SYNC
 
+#define HGSL_GPU_0 0
+#define HGSL_GPU_1 1
+
+/* Internal definitions for memnode->priv */
+#define HGSL_MEMNODE_GUARD_PAGE BIT(0)
+/* The memnode is mapped into a pagetable */
+#define HGSL_MEMNODE_MAPPED BIT(1)
+
 #define HGSL_TIMELINE_NAME_LEN 64
 
 #define HGSL_ISYNC_32BITS_TIMELINE 0
@@ -46,8 +55,6 @@
 #define MAX_DB_QUEUE 9
 #define HGSL_TCSR_NUM 4
 
-/* Number of the GPU device */
-#define HGSL_DEVICE_NUM  (2)
 #define HGSL_CONTEXT_NUM (256)
 
 #define USRPTR(a) u64_to_user_ptr((uint64_t)(a))
@@ -56,6 +63,8 @@
 #define HGSL_IOCTL_FUNC(_cmd, _func) \
 	[_IOC_NR((_cmd))] = \
 		{ .cmd = (_cmd), .func = (_func) }
+
+#define HGSL_FEATURE_MASK_FV   BIT(0)
 
 enum {
 	HGSL_DB_SIGNAL_NONE = 0,
@@ -253,6 +262,22 @@ struct qcom_hgsl {
 	atomic64_t total_mem_size;
 	struct hgsl_cache_flags cache_flags;
 
+	struct hgsl_init_param_t ipcq_settings[HGSL_DEVICE_NUM];
+	struct hgsl_gvm_settings gvm_settings[HGSL_DEVICE_NUM];
+
+	bool fv_on;
+	struct hgsl_mmu mmu;
+	unsigned int cb_num;
+	unsigned int sid;
+	/** @va_start: Start of virtual range used in this pagetable */
+	unsigned long va_start;
+	/** @va_end: End of virtual range */
+	unsigned long va_end;
+	struct list_head pagetable_list;
+	spinlock_t ptlock;
+	enum gsl_devhandle_t device_handle[HGSL_DEVICE_NUM];
+	bool use_single_pt;
+
 	/* Debug nodes */
 	struct kobject sysfs;
 	struct kobject *clients_sysfs;
@@ -304,6 +329,8 @@ struct hgsl_context {
 	struct rt_mutex dispatch_lock;
 	struct hgsl_dispatch_context *dispatch;
 	struct hgsl_event_group event_group;
+
+	struct hgsl_mem_node *ctxt_record_mem_node;
 };
 
 struct hgsl_priv {
@@ -325,6 +352,14 @@ struct hgsl_priv {
 	struct dentry *debugfs_client;
 	struct dentry *debugfs_mem;
 	struct dentry *debugfs_memtype;
+	struct dentry *debugfs_mem_mapped;
+	struct dentry *debugfs_mem_mapped_type;
+	/* pointer to pagetable that the object is mapped in */
+	struct hgsl_pagetable *pagetable[HGSL_DEVICE_NUM];
+	struct mutex sgt_lock;
+	uint32_t dev_open_count;
+	bool is_device_activated;
+	enum gsl_devhandle_t active_devicehandle;
 };
 
 /**
@@ -389,6 +424,21 @@ static inline u32 hgsl_hnd2id(u32 dev_hnd)
 {
 	return (dev_hnd == GSL_HANDLE_NULL) ? (U32_MAX) :
 		((dev_hnd == GSL_HANDLE_DEV1) ? 1 : 0);
+}
+
+static inline struct hgsl_pagetable *hgsl_get_ctxt_pagetable(struct hgsl_priv *priv)
+{
+	struct hgsl_pagetable *pt = NULL;
+
+	if (!priv)
+		goto out;
+
+	// Single pagetable TTBR0 will be used for both the GPU SMMU context banks
+	pt = priv->pagetable[HGSL_GPU_0];
+	//pt = priv->pagetable[priv->devhandle - 1];
+
+out:
+	return pt;
 }
 
 static inline uint32_t get_context_retired_ts(struct hgsl_context *ctxt)
@@ -490,7 +540,7 @@ struct hgsl_hsync_timeline {
 
 /**
  * struct hgsl_hsync_fence - A struct containing a fence and other data
- *				associated with it
+ *				 associated with it
  * @fence: The fence struct
  * @sync_file: Pointer to the sync file
  * @parent: Pointer to the hgsl sync timeline this fence is on
@@ -632,4 +682,5 @@ struct hgsl_sync_fence_cb *hgsl_sync_fence_async_wait(int fd, bool (*func)(void 
 		void *priv);
 void hgsl_sync_fence_async_cancel(struct hgsl_sync_fence_cb *kcb);
 
+void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta);
 #endif /* __HGSL_H_ */

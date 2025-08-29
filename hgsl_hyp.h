@@ -44,7 +44,7 @@
  *   |   reply(result, return call data)    |
  *   | -----------------------------------> |
  *   |                                      |
- *   |              ...                     |
+ *   |                                      |
  */
 
 /*
@@ -76,6 +76,7 @@
 
 struct hgsl_context;
 struct hgsl_priv;
+struct qcom_hgsl;
 
 /* RPC opcodes */
 /* WARNING: when inserting new opcode, please insert it to the end before RPC_FUNC_LAST */
@@ -145,7 +146,7 @@ enum gsl_rpc_func_t {
 	RPC_DEVICE_DEBUG,
 	RPC_CFFDUMP_WAITIRQ,
 	RPC_CFFDUMP_WRITEVERIFYFILE,
-	RPC_MEMORY_MAP_EXT_FD_PURE,  /* Linux extension */
+	RPC_MEMORY_MAP_EXT_FD_PURE, /* Linux extension */
 	RPC_MEMORY_UNMAP_EXT_FD_PURE, /* Linux extension */
 	RPC_GET_SHADOWMEM,
 	RPC_PUT_SHADOWMEM,
@@ -166,6 +167,7 @@ enum gsl_rpc_func_t {
 	RPC_GSLPROFILER_PER_PROC_GPU_PMEM,
 	RPC_DEVICE_GETFEATURES,
 	RPC_DEVICE_ACTIVATE,
+	RPC_GVM_INIT,
 	RPC_FUNC_LAST /* insert new func BEFORE this line! */
 };
 
@@ -234,8 +236,24 @@ struct sub_handshake_params_t {
 };
 
 struct library_open_params_t {
+	uint32_t size;
+	uint32_t flags;
+};
+
+struct library_close_params_t {
+	uint32_t size;
+	uint32_t flags;
+};
+
+struct device_open_params_t {
 	uint32_t            size;
+	enum gsl_deviceid_t device_id;
 	uint32_t            flags;
+};
+
+struct device_close_params_t {
+	uint32_t            size;
+	enum gsl_deviceid_t device_id;
 };
 
 struct context_create_params_t {
@@ -429,11 +447,98 @@ struct register_dbcq_params_t {
 	uint32_t                export_id;
 };
 
+struct context_create_params_v2_t {
+	uint32_t                            size;
+	struct context_create_params_t      ctxt_create_param;
+	struct memory_map_ext_fd_params_t   shadow_map_param;
+	uint64_t                            ttbr0;
+	uint64_t                            ctxt_record_mem_gpu_addr;
+};
+
 struct context_create_params_v1_t {
-	uint32_t                          size;
-	struct context_create_params_t    ctxt_create_param;
-	struct memory_map_ext_fd_params_t shadow_map_param;
-	uint32_t                          dbq_off;
+	uint32_t                            size;
+	struct context_create_params_t      ctxt_create_param;
+	struct memory_map_ext_fd_params_t   shadow_map_param;
+	uint32_t                            dbq_off;
+};
+
+struct device_activate_params {
+	uint32_t                size;
+	uint32_t                devhandle;
+};
+
+struct hgsl_init_param_t {
+	/* All size and offset values are in dword */
+	uint32_t size;
+	/* device handle identifier */
+	uint32_t devhandle;
+	/* Buffer shared between rgs and hgsl for two queues. */
+	uint32_t pkmd_export_id;
+	/* overall size of the queue buffer */
+	uint32_t pkmd_dwsize;
+	/*
+	 * Offset from the base address of the buffer,
+	 * it is also the start address of the queue header
+	 */
+	uint32_t PKMD2HGSL_queue_offset;
+	/* List supported hgsl features */
+	uint32_t feature_flags;
+	/* Ring buffer offset from queue base address */
+	uint32_t PKMD2HGSL_rb_offset;
+
+	/* Buffer shared between gmu and hgsl - only this buffer will be mapped to GMU */
+	uint32_t gmu_export_id;
+	/*
+	 * Overall size of gmu ipcq buffer which should include the gmu2hgsl
+	 * and hgsl2gmu and maybe some other memory
+	 */
+	uint32_t gmu_dwsize;
+	/*
+	 * Offset from the base address of the buffer,
+	 * it is also the start address of the queue header
+	 */
+	uint32_t GMU2HGSL_queue_offset;
+	/* Size of the struct HfiQueueHeader + size of the queue ring buffer */
+	uint32_t GMU2HGSL_queue_size;
+	/* ring buffer offset from queue base address */
+	uint32_t GMU2HGSL_rb_offset;
+	/*
+	 * Offset from the base address of the buffer,
+	 * it is also the start address of the queue header
+	 */
+	uint32_t HGSL2GMU_queue_offset;
+	/* Size of the struct HfiQueueHeader + size of the queue ring buffer */
+	uint32_t HGSL2GMU_queue_size;
+	/* Ring buffer offset from queue base address */
+	uint32_t HGSL2GMU_rb_offset;
+};
+
+struct hgsl_gvm_settings {
+	/* FV bit: 1 */
+	uint32_t enabled_feature_mask;
+	/* SID for this gvm */
+	uint32_t sid;
+	/* Stage 1 context bank index for this gvm */
+	uint32_t cb;
+	/* irq index for the GMU2GOS/GOS2GMU irq */
+	uint32_t irq_index;
+	/* The irq bit used to notice new hfi cmd in PKMD2HGSL queue */
+	uint32_t irq_bit_pkmd_hfi;
+	/* Context record buffer size in KB */
+	uint32_t ctxt_rec_buf_size_KB;
+	/* TODO: add more parameters needed for hw fence */
+	/* GMU virtual addr for the buffer used for hfi cmd/msg queue between hgsl and gmu */
+	uint32_t gmu_addr;
+	/* The irq bit used to notice new hfi cmd in above gmu2hgsl hfi queue */
+	uint32_t irq_bit_gmu_hfi;
+	/* device handle identifier */
+	uint32_t device_id;
+	/* virtual address start */
+	uint32_t va_start;
+	/* virtual address end */
+	uint32_t va_end;
+	/* sync irq shift value */
+	uint32_t sync_irq_shift;
 };
 
 #pragma pack(pop)
@@ -444,9 +549,9 @@ struct hgsl_hab_channel_t {
 	int id;
 	bool wait_retry;
 	bool busy;
-	struct hgsl_hyp_priv_t  *priv;
-	struct gsl_hab_payload  send_buf;
-	struct gsl_hab_payload  recv_buf;
+	struct hgsl_hyp_priv_t *priv;
+	struct gsl_hab_payload send_buf;
+	struct gsl_hab_payload recv_buf;
 };
 
 struct hgsl_dbq_info {
@@ -463,6 +568,10 @@ struct hgsl_dbq_info {
 	struct hgsl_hab_channel_t *hab_channel;
 };
 
+int hgsl_hyp_query_gvm_setting(struct hgsl_hyp_priv_t *priv,
+		struct hgsl_init_param_t *ptr_ipcq_settings,
+		struct hgsl_gvm_settings *ptr_gvm_settings);
+
 int hgsl_hyp_init(struct hgsl_hyp_priv_t *priv, struct device *dev,
 	int client_pid, const char * const client_name);
 
@@ -477,11 +586,23 @@ int hgsl_hyp_generic_transaction(struct hgsl_hyp_priv_t *priv,
 	struct hgsl_ioctl_hyp_generic_transaction_params *params,
 	void **pSend, void **pReply, void *pRval);
 
-int hgsl_hyp_gsl_lib_open(struct hgsl_hyp_priv_t *priv,
-	uint32_t flags, int32_t *rval);
+int hgsl_hyp_lib_open(struct hgsl_hyp_priv_t *priv,
+		uint32_t flags, int32_t *rval);
+
+int hgsl_hyp_lib_close(struct hgsl_hyp_priv_t *priv,
+		uint32_t flags, int32_t *rval);
 
 int hgsl_hyp_ctxt_create(struct hgsl_hab_channel_t *hab_channel,
-	struct hgsl_ioctl_ctxt_create_params *hgsl_params);
+		struct hgsl_ioctl_ctxt_create_params *hgsl_params);
+
+int hgsl_hyp_device_open(struct hgsl_hyp_priv_t *priv,
+		uint32_t flags, enum gsl_deviceid_t device_id, int32_t *rval);
+
+int hgsl_hyp_device_close(struct hgsl_hyp_priv_t *priv,
+		int32_t *rval, enum gsl_deviceid_t device_id);
+
+int hgsl_hyp_activate_device_handle(struct hgsl_hyp_priv_t *priv,
+		struct hgsl_ioctl_activate_device_params *hgsl_param);
 
 int hgsl_hyp_dbq_create(struct hgsl_hab_channel_t *hab_channel,
 	uint32_t ctxthandle, uint32_t *dbq_info);
@@ -564,9 +685,15 @@ int hgsl_hyp_context_register_dbcq(struct hgsl_hab_channel_t *hab_channel,
 	uint32_t queue_body_offset, uint32_t *export_id);
 
 int hgsl_hyp_ctxt_create_v1(struct device *dev,
-			struct hgsl_priv *priv,
-			struct hgsl_hab_channel_t *hab_channel,
-			struct hgsl_context *ctxt,
-			struct hgsl_ioctl_ctxt_create_params *hgsl_params,
-			int dbq_off, uint32_t *dbq_info);
+	struct hgsl_priv *priv,
+	struct hgsl_hab_channel_t *hab_channel,
+	struct hgsl_context *ctxt,
+	struct hgsl_ioctl_ctxt_create_params *hgsl_params,
+	int dbq_off, uint32_t *dbq_info);
+
+int hgsl_hyp_ctxt_create_v2(struct device *dev,
+	struct hgsl_priv *priv,
+	struct hgsl_hab_channel_t *hab_channel,
+	struct hgsl_context *ctxt,
+	struct hgsl_ioctl_ctxt_create_params *hgsl_params);
 #endif

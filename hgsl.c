@@ -21,6 +21,8 @@
 #include <linux/delay.h>
 #include <trace/events/gpu_mem.h>
 #include <linux/suspend.h>
+#include <linux/component.h>
+#include <linux/delay.h>
 
 #include "hgsl.h"
 #include "hgsl_tcsr.h"
@@ -50,38 +52,39 @@
 /* Max retry count of waiting for free space of doorbell queue. */
 #define HGSL_QFREE_MAX_RETRY_COUNT     (500)
 #define GLB_DB_SRC_ISSUEIB_IRQ_ID_0    TCSR_SRC_IRQ_ID_0
+
 #define GLB_DB_DEST_TS_RETIRE_IRQ_ID   TCSR_DEST_IRQ_ID_0
 #define GLB_DB_DEST_TS_RETIRE_IRQ_MASK TCSR_DEST_IRQ_MASK_0
 
 #define HGSL_HYP_GENERAL_MAX_SIZE 4096
 
-#define DB_STATE_Q_MASK	0xffff
-#define DB_STATE_Q_UNINIT	1
-#define DB_STATE_Q_INIT_DONE	2
-#define DB_STATE_Q_FAULT	3
+#define DB_STATE_Q_MASK 0xffff
+#define DB_STATE_Q_UNINIT   1
+#define DB_STATE_Q_INIT_DONE    2
+#define DB_STATE_Q_FAULT    3
 
 /* Doorbell Signal types */
-#define DB_SIGNAL_INVALID	0
-#define DB_SIGNAL_GLOBAL_0	1
-#define DB_SIGNAL_GLOBAL_1	2
-#define DB_SIGNAL_LOCAL	3
-#define DB_SIGNAL_MAX	DB_SIGNAL_LOCAL
-#define DB_SIGNAL_GLOBAL_2	3
-#define DB_SIGNAL_GLOBAL_3	4
-#define DBCQ_SIGNAL_MAX	DB_SIGNAL_GLOBAL_3
+#define DB_SIGNAL_INVALID   0
+#define DB_SIGNAL_GLOBAL_0  1
+#define DB_SIGNAL_GLOBAL_1  2
+#define DB_SIGNAL_LOCAL 3
+#define DB_SIGNAL_MAX   DB_SIGNAL_LOCAL
+#define DB_SIGNAL_GLOBAL_2  3
+#define DB_SIGNAL_GLOBAL_3  4
+#define DBCQ_SIGNAL_MAX DB_SIGNAL_GLOBAL_3
 #define HGSL_CLEANUP_WAIT_SLICE_IN_MS  50
 
 #define QHDR_STATUS_INACTIVE 0x00
 #define QHDR_STATUS_ACTIVE 0x01
 
-#define HGSL_SEND_MSG_MAX_RETRY_COUNT        (150)
+#define HGSL_SEND_MSG_MAX_RETRY_COUNT   (150)
 
 // Skip all commands from the bad context
-#define HGSL_FT_POLICY_FLAG_KILL             BIT(2)
+#define HGSL_FT_POLICY_FLAG_KILL        BIT(2)
 
-#define ALIGN_ADDRESS_4DWORD(addr)         (((addr)+15) & ((long long) ~15))
+#define ALIGN_ADDRESS_4DWORD(addr)      (((addr)+15) & ((long long) ~15))
 #define ALIGN_DWORD_ADDRESS_4DWORD(dwaddr) (ALIGN_ADDRESS_4DWORD((dwaddr) * \
-				sizeof(uint32_t)) / sizeof(uint32_t))
+                sizeof(uint32_t)) / sizeof(uint32_t))
 
 enum HGSL_DBQ_METADATA_COMMAND_INFO {
 	HGSL_DBQ_METADATA_CONTEXT_INFO,
@@ -89,15 +92,15 @@ enum HGSL_DBQ_METADATA_COMMAND_INFO {
 	HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 };
 
-#define HGSL_DBQ_CONTEXT_ANY                 (0x0)
-#define HGSL_DBQ_OFFSET_ZERO                 (0x0)
+#define HGSL_DBQ_CONTEXT_ANY    (0x0)
+#define HGSL_DBQ_OFFSET_ZERO    (0x0)
 
-#define HGSL_DBQ_WRITE_INDEX_OFFSET_IN_DWORD (0x0)
-#define HGSL_DBQ_READ_INDEX_OFFSET_IN_DWORD  (0x1)
+#define HGSL_DBQ_WRITE_INDEX_OFFSET_IN_DWORD    (0x0)
+#define HGSL_DBQ_READ_INDEX_OFFSET_IN_DWORD     (0x1)
 
-#define HGSL_DBQ_IBDESC_SHORT_WAIT_MSEC      (5)
-#define HGSL_DBQ_IBDESC_LONG_WAIT_MSEC       (30000)
-#define HGSL_DBCQ_IBDESC_SHORT_WAIT_MSEC     (5000)
+#define HGSL_DBQ_IBDESC_SHORT_WAIT_MSEC     (5)
+#define HGSL_DBQ_IBDESC_LONG_WAIT_MSEC      (30000)
+#define HGSL_DBCQ_IBDESC_SHORT_WAIT_MSEC    (5000)
 
 enum HGSL_DBQ_METADATA_COOPERATIVE_RESET_INFO {
 	HGSL_DBQ_HOST_TO_GVM_HARDRESET_REQ,
@@ -366,7 +369,7 @@ struct db_ignore_retpacket {
 } __packed;
 
 #ifdef CONFIG_TRACE_GPU_MEM
-static inline void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta)
+void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta)
 {
 	struct qcom_hgsl *hgsl = priv->dev;
 	uint64_t size = atomic64_add_return(delta, &priv->total_mem_size);
@@ -414,7 +417,7 @@ static inline bool is_global_db(int tcsr_idx)
 	return (tcsr_idx >= 0);
 }
 
-static void gmu_ring_local_db(struct qcom_hgsl  *hgsl, unsigned int value)
+static void gmu_ring_local_db(struct qcom_hgsl	*hgsl, unsigned int value)
 {
 	hgsl_reg_write(&hgsl->reg_dbidx, 0, value);
 }
@@ -424,7 +427,43 @@ static void tcsr_ring_global_db(struct qcom_hgsl *hgsl, uint32_t tcsr_idx,
 {
 	if (tcsr_idx < HGSL_TCSR_NUM)
 		hgsl_tcsr_irq_trigger(hgsl->tcsr[tcsr_idx][HGSL_TCSR_ROLE_SENDER],
-						GLB_DB_SRC_ISSUEIB_IRQ_ID_0 + dbq_idx);
+				GLB_DB_SRC_ISSUEIB_IRQ_ID_0 + dbq_idx);
+}
+
+static inline bool get_fv_status(struct qcom_hgsl *hgsl, u32 dev_id)
+{
+	bool fv_status = false;
+
+	if (!hgsl->fv_on)
+		goto out;
+
+	if (dev_id >= HGSL_DEVICE_NUM) {
+		LOGE("Invalid dev_id %u", dev_id);
+		goto out;
+	}
+
+	fv_status = (0 != (hgsl->gvm_settings[dev_id].enabled_feature_mask & HGSL_FEATURE_MASK_FV)
+				? true : false);
+
+out:
+	return fv_status;
+}
+
+/*
+ * Check the device open count and activate flag status to reject or
+ * accept the request. If the device is activated then allow the
+ * request otherwise reject the request.
+ */
+static inline bool is_request_rejected(struct qcom_hgsl *hgsl, bool use_fv, struct hgsl_priv *priv)
+{
+	bool request_rejected = false;
+
+	/* TO DO: use use_fv variable later here  */
+	mutex_lock(&hgsl->mutex);
+	request_rejected = ((priv->dev_open_count > 1) && (!priv->is_device_activated));
+	mutex_unlock(&hgsl->mutex);
+
+	return request_rejected;
 }
 
 static uint32_t db_queue_freedwords(struct doorbell_queue *dbq)
@@ -618,7 +657,7 @@ quit:
 	return ret;
 }
 
-static int db_send_msg(struct hgsl_priv  *priv,
+static int db_send_msg(struct hgsl_priv	 *priv,
 			struct db_msg_id *db_msg_id,
 			struct db_msg_request *msg_req,
 			struct db_msg_response *msg_resp,
@@ -961,9 +1000,11 @@ err:
 
 static void hgsl_dbcq_close(struct hgsl_context *ctxt)
 {
-	struct doorbell_context_queue *dbcq = ctxt->dbcq;
+	struct doorbell_context_queue *dbcq = NULL;
 
-	if (!dbcq)
+	if (ctxt && ctxt->dbcq)
+		dbcq = ctxt->dbcq;
+	else
 		return;
 
 	if (dbcq->queue_mem != NULL) {
@@ -1014,6 +1055,8 @@ static int hgsl_dbcq_open(struct hgsl_priv *priv,
 		goto err;
 	}
 
+	dbcq->queue_mem->mem_node_iommu_info.ptr_hgsl_priv = priv;
+
 	dbcq->queue_mem->flags = GSL_MEMFLAGS_UNCACHED | GSL_MEMFLAGS_ALIGN4K;
 	ret = hgsl_sharedmem_alloc(hgsl->dev, HGSL_CTXT_QUEUE_TOTAL_SIZE,
 		dbcq->queue_mem->flags, dbcq->queue_mem);
@@ -1058,11 +1101,11 @@ err:
 out:
 	hgsl_hyp_channel_pool_put(hab_channel);
 
-	LOGI("%d", ret);
+	LOGD("%d", ret);
 	return ret;
 }
 
-static int hgsl_dbcq_issue_cmd(struct hgsl_priv  *priv,
+static int hgsl_dbcq_issue_cmd(struct hgsl_priv *priv,
 			struct hgsl_context *ctxt, uint32_t num_ibs,
 			uint32_t gmu_cmd_flags,
 			uint32_t *timestamp,
@@ -1330,8 +1373,7 @@ out:
 static void hgsl_reset_dbq(struct doorbell_queue *dbq)
 {
 	if (dbq->dma) {
-		dma_buf_end_cpu_access(dbq->dma,
-				       DMA_BIDIRECTIONAL);
+		dma_buf_end_cpu_access(dbq->dma, DMA_BIDIRECTIONAL);
 		if (dbq->vbase) {
 			dma_buf_vunmap_unlocked(dbq->dma, &dbq->map);
 			dbq->vbase = NULL;
@@ -1379,32 +1421,96 @@ out:
 	return ret;
 }
 
-static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
+static void hgsl_close_global_hyp_and_gsl_lib(struct qcom_hgsl *hgsl)
 {
-	int ret = 0;
 	int rval = 0;
-	unsigned int retry_count = 5;
 
-	ret = hgsl_hyp_init(&hgsl->global_hyp, hgsl->dev, 0, "hgsl");
-	if (ret != 0)
-		goto out;
-
-	/* Retry to communicate with BE here */
-	do {
-		ret = hgsl_hyp_gsl_lib_open(&hgsl->global_hyp, 0, &rval);
-	} while (ret == -EAGAIN && retry_count--);
-	if (rval)
-		ret = -EINVAL;
-	else
-		hgsl->global_hyp_inited = true;
-out:
-	if (ret) {
-		LOGE("Failed to open gsl lib ret: %d retry_count: %u\n",
-				ret, retry_count);
-		hgsl_hyp_close(&hgsl->global_hyp);
+	if (hgsl->global_hyp_inited) {
+		(void)hgsl_hyp_lib_close(&hgsl->global_hyp, 0, &rval);
+		if (rval)
+			LOGW("hgsl_hyp_lib_close() failed");
+		hgsl->global_hyp_inited = false;
 	}
 
-	return ret;
+	hgsl_hyp_close(&hgsl->global_hyp);
+}
+
+static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
+{
+	int ret[HGSL_DEVICE_NUM] = {-1};
+	u32 dev_hnd = 0;
+	int ret_val = 0;
+	int rval = 0;
+	unsigned int retry_count = 5;
+	enum gsl_deviceid_t device_id = GSL_DEVICE_UNUSED;
+	u32 gpu_id = 0;
+
+	ret_val = hgsl_hyp_init(&hgsl->global_hyp, hgsl->dev, 0, "hgsl");
+	if (ret_val != 0)
+		goto out;
+
+	/* Retry to communicate with BE here first do gsl_lib_open*/
+	do {
+		ret_val = hgsl_hyp_lib_open(&hgsl->global_hyp, 0, &rval);
+	} while (ret_val == -EAGAIN && retry_count--);
+
+	if (rval) {
+		LOGE("hgsl_hyp_lib_open() failed with ret_val %d", ret_val);
+		ret_val = -EINVAL;
+		hgsl_hyp_close(&hgsl->global_hyp);
+		goto out;
+	}
+
+	/* Do gsl_device_open for both GPU device handles */
+	for (dev_hnd = GSL_HANDLE_DEV0; dev_hnd <= HGSL_DEVICE_NUM; dev_hnd++) {
+		device_id = (dev_hnd == GSL_HANDLE_DEV0) ? GSL_DEVICE_0 : GSL_DEVICE_1;
+		gpu_id = hgsl_hnd2id(dev_hnd);
+
+		if (hgsl->fv_on) {
+			LOGD("hgsl_hyp_device_open for device id %d", device_id);
+			ret[gpu_id] = hgsl_hyp_device_open(&hgsl->global_hyp, 0,
+							device_id, &rval);
+			if (ret[gpu_id]) {
+				LOGE("hgsl_hyp_device_open() failed for %s with ret %d",
+						((dev_hnd == GSL_HANDLE_DEV0) ? "GSL_HANDLE_DEV0" :
+								"GSL_HANDLE_DEV1"), ret[gpu_id]);
+				ret_val = -EINVAL;
+				continue;
+			} else {
+				/*
+				 * Device handle returned by BE should be according to
+				 * passed device id for other values consider it as error.
+				 */
+				if (dev_hnd != rval) {
+					LOGE("Inval dev_handle from BE rval=%d dev_id %d",
+							rval, device_id);
+					ret_val = -EINVAL;
+					continue;
+				} else {
+					LOGD("Dev_handle from BE %d dev_id %d",
+							rval, device_id);
+					hgsl->device_handle[gpu_id] = rval;
+				}
+			}
+		}
+	}
+
+	if (ret[GSL_HANDLE_DEV0 - 1] && ret[GSL_HANDLE_DEV1 - 1]) {
+		LOGE("Failed for both GPU device handles");
+		hgsl_close_global_hyp_and_gsl_lib(hgsl);
+		ret_val = -EINVAL;
+		goto out;
+	} else {
+		/*
+		 * Return ret_val as an error only when hgsl fails
+		 * to open both GPU device handles.
+		 */
+		ret_val = 0;
+		hgsl->global_hyp_inited = true;
+	}
+
+out:
+	return ret_val;
 }
 
 static int hgsl_dbq_init(struct qcom_hgsl *hgsl,
@@ -1831,7 +1937,7 @@ static int dbcq_get_free_indirect_ib_buffer(struct hgsl_priv  *priv,
 
 		if (ret) {
 			if (ret == -ETIMEDOUT) {
-				LOGI("Timed out waiting for indirect submission buffer %d", ret);
+				LOGW("Timed out waiting for indirect submission buffer %d", ret);
 				ret = -EAGAIN;
 			}
 			return ret;
@@ -1903,6 +2009,7 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	int ret;
 	bool put_channel = false;
 	struct doorbell_queue *dbq = NULL;
+	struct hgsl_pagetable *pt = NULL;
 
 	ctxt = hgsl_get_context(hgsl, dev_hnd, context_id);
 	if (!ctxt) {
@@ -1963,7 +2070,18 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 		_cleanup_shadow(hab_channel, ctxt);
 
 	ret = hgsl_hyp_ctxt_destroy(hab_channel,
-		ctxt->devhandle, ctxt->context_id, rval, ctxt->dbcq_export_id);
+			ctxt->devhandle, ctxt->context_id, rval, ctxt->dbcq_export_id);
+	if (ctxt && ctxt->ctxt_record_mem_node) {
+		mutex_lock(&priv->lock);
+		rb_erase(&ctxt->ctxt_record_mem_node->mem_rb_node, &priv->mem_allocated);
+		mutex_unlock(&priv->lock);
+		hgsl_trace_gpu_mem_total(priv, -(ctxt->ctxt_record_mem_node->memdesc.size64));
+		pt = hgsl_get_ctxt_pagetable(priv);
+		(void)hgsl_mmu_put_gpuaddr(pt, ctxt->ctxt_record_mem_node, hgsl->use_single_pt);
+		(void)hgsl_mmu_unmap(hgsl, pt, ctxt->ctxt_record_mem_node, true, dev_hnd);
+		hgsl_sharedmem_free(ctxt->ctxt_record_mem_node);
+		ctxt->ctxt_record_mem_node = NULL;
+	}
 
 	hgsl_dbcq_close(ctxt);
 
@@ -2033,8 +2151,11 @@ static int hgsl_ioctl_ctxt_create(
 		params->flags |= GSL_CONTEXT_FLAG_USER_GENERATED_TS;
 	}
 
-	ret = hgsl_hyp_ctxt_create_v1(hgsl->dev, priv, hab_channel,
-			ctxt, params, dbq_off, &dbq_info);
+	if (get_fv_status(hgsl, dev_id))
+		ret = hgsl_hyp_ctxt_create_v2(hgsl->dev, priv, hab_channel, ctxt, params);
+	else
+		ret = hgsl_hyp_ctxt_create_v1(hgsl->dev, priv, hab_channel, ctxt, params,
+				dbq_off, &dbq_info);
 	if (ret) {
 		/* fallback to legacy mode */
 		ret = hgsl_hyp_ctxt_create(hab_channel, params);
@@ -2292,24 +2413,35 @@ static int hgsl_ioctl_mem_alloc(
 	int ret = 0, mem_fd = -1;
 	struct hgsl_mem_node *mem_node = NULL;
 	struct hgsl_hab_channel_t *hab_channel = NULL;
+	struct hgsl_pagetable *pt = NULL;
+	u32 dev_id = hgsl_hnd2id(priv->active_devicehandle);
+	bool use_fv = get_fv_status(hgsl, dev_id);
 
-	ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
-	if (ret) {
-		LOGE("Failed to get hab channel %d", ret);
-		goto out;
+	if (is_request_rejected(hgsl, use_fv, priv)) {
+		LOGE("Request rejected: Neither of the two opened devices is active.");
+		ret = -EINVAL;
+		goto exit;
 	}
 
 	if (params->sizebytes == 0) {
 		LOGE("requested size is 0");
 		ret = -EINVAL;
-		goto out;
+		goto exit;
 	}
 
 	mem_fd = get_unused_fd_flags(O_CLOEXEC);
 	if (mem_fd < 0) {
 		LOGE("no available fd %d", mem_fd);
 		ret = -EMFILE;
-		goto out;
+		goto exit;
+	}
+
+	if (!use_fv) {
+		ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
+		if (ret) {
+			LOGE("Failed to get hab channel %d", ret);
+			goto out;
+		}
 	}
 
 	mem_node = hgsl_mem_node_zalloc(hgsl->cache_flags);
@@ -2319,14 +2451,35 @@ static int hgsl_ioctl_mem_alloc(
 	}
 
 	mem_node->flags = params->flags;
+	mem_node->mem_node_iommu_info.ptr_hgsl_priv = priv;
 
 	ret = hgsl_sharedmem_alloc(hgsl->dev, params->sizebytes, params->flags, mem_node);
 	if (ret)
 		goto out;
 
-	ret = hgsl_hyp_mem_map_smmu(hab_channel, mem_node->memdesc.size, 0, mem_node);
-	LOGD("%d, %d, gpuaddr 0x%llx",
-		ret, mem_node->export_id, mem_node->memdesc.gpuaddr);
+	/*
+	 * In case of full virtualization, front end will take care of
+	 * finding unused gpu address and do smmu map.
+	 */
+	if (use_fv && (!(params->flags & GSL_MEMFLAGS_PROTECTED)) &&
+		(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+		pt = hgsl_get_ctxt_pagetable(priv);
+
+		ret = hgsl_mmu_get_gpuaddr(pt, mem_node, hgsl->use_single_pt);
+		if (ret) {
+			LOGE("Error getting unused GPU address");
+			ret = -EINVAL;
+		} else {
+			/*
+			 * Single pagetable TTBR0 will be used for
+			 * both the GPU SMMU context banks.
+			 */
+			ret = hgsl_mmu_map(hgsl, pt, mem_node, true,
+								priv->active_devicehandle);
+		}
+	} else
+		ret = hgsl_hyp_mem_map_smmu(hab_channel,
+					mem_node->memdesc.size, 0, mem_node);
 	if (ret)
 		goto out;
 
@@ -2352,14 +2505,25 @@ static int hgsl_ioctl_mem_alloc(
 out:
 	if (ret) {
 		if (mem_node) {
-			hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
+			if (use_fv && (!(params->flags & GSL_MEMFLAGS_PROTECTED)) &&
+				(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+				(void)hgsl_mmu_unmap(hgsl, pt, mem_node, true,
+						priv->active_devicehandle);
+				hgsl_mmu_put_gpuaddr(pt, mem_node, hgsl->use_single_pt);
+			} else {
+				hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
+			}
 			hgsl_sharedmem_free(mem_node);
 		}
 
 		if (mem_fd >= 0)
 			put_unused_fd(mem_fd);
 	}
-	hgsl_hyp_channel_pool_put(hab_channel);
+
+	if (!use_fv)
+		hgsl_hyp_channel_pool_put(hab_channel);
+
+exit:
 	return ret;
 }
 
@@ -2369,24 +2533,35 @@ static int hgsl_ioctl_mem_free(
 {
 	struct hgsl_priv *priv = filep->private_data;
 	struct hgsl_ioctl_mem_free_params *params = data;
+	struct qcom_hgsl *hgsl = priv->dev;
 	struct gsl_memdesc_t memdesc;
 	int ret = 0;
 	struct hgsl_mem_node *node_found = NULL;
 	struct hgsl_hab_channel_t *hab_channel = NULL;
+	struct hgsl_pagetable *pt = NULL;
+	u32 dev_id = hgsl_hnd2id(priv->active_devicehandle);
+	bool use_fv = get_fv_status(hgsl, dev_id);
 
-	ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
-	if (ret) {
-		LOGE("Failed to get hab channel %d", ret);
-		goto out;
+	if (is_request_rejected(hgsl, use_fv, priv)) {
+		LOGE("Request rejected: Neither of the two opened devices is active.");
+		ret = -EINVAL;
+		goto exit;
 	}
 
 	if (copy_from_user(&memdesc, USRPTR(params->memdesc),
 		sizeof(memdesc))) {
 		LOGE("failed to copy memdesc from user");
 		ret = -EFAULT;
-		goto out;
+		goto exit;
 	}
 
+	if (!use_fv) {
+		ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
+		if (ret) {
+			LOGE("Failed to get hab channel %d", ret);
+			goto out;
+		}
+	}
 	mutex_lock(&priv->lock);
 	node_found = hgsl_mem_find_node_locked(&priv->mem_allocated,
 					memdesc.gpuaddr, memdesc.size64, true);
@@ -2394,10 +2569,20 @@ static int hgsl_ioctl_mem_free(
 		rb_erase(&node_found->mem_rb_node, &priv->mem_allocated);
 	mutex_unlock(&priv->lock);
 	if (node_found) {
-		ret = hgsl_hyp_mem_unmap_smmu(hab_channel, node_found);
+		if (use_fv && (!(node_found->flags & GSL_MEMFLAGS_PROTECTED)) &&
+				(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+			pt = hgsl_get_ctxt_pagetable(priv);
+			// Single pagetable TTBR0 will be used for both the GPU SMMU context banks
+			ret = hgsl_mmu_unmap(hgsl, pt, node_found, true, priv->active_devicehandle);
+		} else
+			ret = hgsl_hyp_mem_unmap_smmu(hab_channel, node_found);
+
 		if (!ret) {
-			hgsl_trace_gpu_mem_total(priv,
-					-(node_found->memdesc.size64));
+			// For FV release GPU address if FE unmapping is successful.
+			if (use_fv)
+				hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
+
+			hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
 			hgsl_sharedmem_free(node_found);
 		} else {
 			LOGE("hgsl_hyp_mem_unmap_smmu failed %d", ret);
@@ -2408,11 +2593,13 @@ static int hgsl_ioctl_mem_free(
 				LOGE("unlikely to get here! %d", ret);
 		}
 	} else
-		LOGE("can't find the memory 0x%llx, 0x%x",
-			memdesc.gpuaddr, memdesc.size);
+		LOGE("can't find the memory 0x%llx, 0x%x", memdesc.gpuaddr, memdesc.size);
 
 out:
-	hgsl_hyp_channel_pool_put(hab_channel);
+	if (!use_fv)
+		hgsl_hyp_channel_pool_put(hab_channel);
+
+exit:
 	return ret;
 }
 
@@ -2477,11 +2664,34 @@ static int hgsl_ioctl_mem_map_smmu(
 	int ret = 0;
 	struct hgsl_mem_node *mem_node = NULL;
 	struct hgsl_hab_channel_t *hab_channel = NULL;
+	struct hgsl_pagetable *pt = NULL;
+	u32 dev_id = hgsl_hnd2id(priv->active_devicehandle);
+	bool use_fv = get_fv_status(hgsl, dev_id);
 
-	ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
-	if (ret) {
-		LOGE("Failed to get hab channel %d", ret);
-		goto out;
+	if (is_request_rejected(hgsl, use_fv, priv)) {
+		LOGE("Request rejected: Neither of the two opened devices is active.");
+		ret = -EINVAL;
+		goto exit;
+	}
+
+	if (params->offset) {
+		LOGE("offset is non zero %u so reject the request", params->offset);
+		ret = -EINVAL;
+		goto exit;
+	}
+
+	if (params->size == 0 || params->size > U32_MAX - PAGE_SIZE) {
+		LOGE("Invalid size %u", params->size);
+		ret = -EINVAL;
+		goto exit;
+	}
+
+	if (!use_fv) {
+		ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
+		if (ret) {
+			LOGE("Failed to get hab channel %d", ret);
+			goto out;
+		}
 	}
 
 	mem_node = hgsl_mem_node_zalloc(hgsl->cache_flags);
@@ -2494,8 +2704,30 @@ static int hgsl_ioctl_mem_map_smmu(
 	mem_node->flags = params->flags;
 	mem_node->fd = params->fd;
 	mem_node->memtype = params->memtype;
+	mem_node->mem_node_iommu_info.ptr_hgsl_priv = priv;
+	mem_node->memdesc.size = params->size;
 
-	ret = hgsl_hyp_mem_map_smmu(hab_channel, params->size, params->offset, mem_node);
+	if (use_fv && (!(params->flags & GSL_MEMFLAGS_PROTECTED)) &&
+		(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+		/*
+		 * Single pagetable TTBR0 will be used for both the GPU SMMU context banks
+		 * GPU address shall be 0 so that unused gpu address can be assigned
+		 */
+		if (mem_node->memdesc.gpuaddr) {
+			LOGE("GPU address should be 0");
+			ret = -EINVAL;
+		} else {
+			pt = hgsl_get_ctxt_pagetable(priv);
+			ret = hgsl_mmu_get_gpuaddr(pt, mem_node, hgsl->use_single_pt);
+			if (ret)
+				LOGE("Error getting unused GPU address");
+			else
+				ret = hgsl_mmu_map(hgsl, pt, mem_node, false,
+							  priv->active_devicehandle);
+		}
+	} else
+		ret = hgsl_hyp_mem_map_smmu(hab_channel, params->size,
+						params->offset, mem_node);
 	if (ret)
 		goto out;
 
@@ -2513,10 +2745,20 @@ static int hgsl_ioctl_mem_map_smmu(
 
 out:
 	if (ret) {
-		hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
+		if (use_fv && (!(params->flags & GSL_MEMFLAGS_PROTECTED)) &&
+							(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+			hgsl_mmu_unmap(hgsl, pt, mem_node, false, priv->active_devicehandle);
+			hgsl_mmu_put_gpuaddr(pt, mem_node, hgsl->use_single_pt);
+		} else
+			hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
+
 		hgsl_free(mem_node);
 	}
-	hgsl_hyp_channel_pool_put(hab_channel);
+
+	if (!use_fv)
+		hgsl_hyp_channel_pool_put(hab_channel);
+
+exit:
 	return ret;
 }
 
@@ -2526,14 +2768,26 @@ static int hgsl_ioctl_mem_unmap_smmu(
 {
 	struct hgsl_priv *priv = filep->private_data;
 	struct hgsl_ioctl_mem_unmap_smmu_params *params = data;
+		struct qcom_hgsl *hgsl = priv->dev;
 	int ret = 0;
 	struct hgsl_mem_node *node_found = NULL;
 	struct hgsl_hab_channel_t *hab_channel = NULL;
+	struct hgsl_pagetable  *pt = NULL;
+	u32 dev_id = hgsl_hnd2id(priv->active_devicehandle);
+	bool use_fv = get_fv_status(hgsl, dev_id);
 
-	ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
-	if (ret) {
-		LOGE("Failed to get hab channel %d", ret);
-		goto out;
+	if (is_request_rejected(hgsl, use_fv, priv)) {
+		LOGE("Request rejected: Neither of the two opened devices is active.");
+		ret = -EINVAL;
+		goto exit;
+	}
+
+	if (!use_fv) {
+		ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
+		if (ret) {
+			LOGE("Failed to get hab channel %d", ret);
+			goto out;
+		}
 	}
 
 	mutex_lock(&priv->lock);
@@ -2544,14 +2798,26 @@ static int hgsl_ioctl_mem_unmap_smmu(
 	mutex_unlock(&priv->lock);
 
 	if (node_found) {
-		hgsl_put_sgt(node_found, false);
-		ret = hgsl_hyp_mem_unmap_smmu(hab_channel, node_found);
+		if (use_fv && (!(node_found->flags & GSL_MEMFLAGS_PROTECTED))) {
+			pt = hgsl_get_ctxt_pagetable(priv);
+			// Single pagetable TTBR0 will be used for both the GPU SMMU context banks
+			ret = hgsl_mmu_unmap(hgsl, pt, node_found, false,
+					priv->active_devicehandle);
+		} else {
+			hgsl_put_sgt(node_found, false);
+			ret = hgsl_hyp_mem_unmap_smmu(hab_channel, node_found);
+		}
 		if (!ret) {
+			// For FV release GPU address if FE unmapping is successful.
+			if (use_fv && (!(node_found->flags & GSL_MEMFLAGS_PROTECTED)))
+				hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
+
 			hgsl_trace_gpu_mem_total(priv,
 					-(node_found->memdesc.size64));
 			hgsl_free(node_found);
 		} else {
-			LOGE("hgsl_hyp_mem_unmap_smmu failed %d", ret);
+			LOGE("mem_unmap_smmu failed %d", ret);
+
 			mutex_lock(&priv->lock);
 			ret = hgsl_mem_add_node(&priv->mem_mapped, node_found);
 			mutex_unlock(&priv->lock);
@@ -2562,7 +2828,10 @@ static int hgsl_ioctl_mem_unmap_smmu(
 		ret = -EINVAL;
 
 out:
-	hgsl_hyp_channel_pool_put(hab_channel);
+	if (!use_fv)
+		hgsl_hyp_channel_pool_put(hab_channel);
+
+exit:
 	return ret;
 }
 
@@ -3301,11 +3570,124 @@ static int hgsl_ioctl_perfcounter_read(
 	return hgsl_hyp_perfcounter_read(&priv->hyp_priv, param);
 }
 
+static int hgsl_ioctl_device_open(
+		struct file *filep,
+		void *data)
+{
+	struct hgsl_priv *priv = filep->private_data;
+	struct qcom_hgsl *hgsl = priv->dev;
+	struct hgsl_ioctl_device_open_params *param = data;
+	int ret = 0;
+	int rval = 0;
+	int dev_handle = GSL_HANDLE_NULL;
+	u32 dev_id = 0;
+	u32 use_fv = 0;
+
+	ret = hgsl_hyp_device_open(&priv->hyp_priv, param->flags, param->device_id, &dev_handle);
+	LOGI("device handle returned is %d", dev_handle);
+	if (ret == 0) {
+		if ((dev_handle != GSL_HANDLE_DEV0) && (dev_handle != GSL_HANDLE_DEV1)) {
+			ret = -EINVAL;
+			LOGE("Invalid device handle=%u by backend for dev_id=%d",
+					dev_handle, param->device_id);
+			goto out;
+		}
+
+		if (copy_to_user(USRPTR(param->ret_value), &dev_handle, sizeof(dev_handle))) {
+			LOGE("Error while copying ret_value for device handle");
+			(void)hgsl_hyp_device_close(&priv->hyp_priv, &rval, param->device_id);
+			ret = -EFAULT;
+			goto out;
+		}
+
+		/*
+		 * Increment device open count only when application wants to
+		 * open with a different dev handle.
+		 */
+		if (priv->active_devicehandle != dev_handle)
+			priv->dev_open_count++;
+
+		/*
+		 * Store the active device handle when application calls
+		 * device_open for first time.
+		 */
+		mutex_lock(&hgsl->mutex);
+		if ((priv->dev_open_count == 1) && (!priv->is_device_activated)
+				&& (priv->active_devicehandle != dev_handle))
+			priv->active_devicehandle = dev_handle;
+		mutex_unlock(&hgsl->mutex);
+		/*
+		 * TO DO: This needs to be changed when application have option to use both GPUs.
+		 * As of now, application can open only one GPU either GPU0 or GPU1.
+		 * Store information in priv->iommu_mask which tells about GPU device,
+		 * an application is allowed to use or which devhandle application has activated.
+		 */
+		dev_id = hgsl_hnd2id(dev_handle);
+		use_fv = get_fv_status(hgsl, dev_id);
+		LOGD("dev_id is %u dev open count is %u", dev_id, priv->dev_open_count);
+		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+			/* TO DO: need to have iommu_mask to create two pagetables
+			 * for each of the GPU IOMMU
+			 * As of now create only one pagetable for both GPU IOMMUs.
+			 * Allocate a pagetable for the new process object if FV is enabled
+			 */
+			if (!hgsl->use_single_pt) {
+				priv->pagetable[HGSL_GPU_0] = hgsl_mmu_getpagetable(&hgsl->mmu,
+												priv->pid, GSL_HANDLE_DEV0);
+				if (IS_ERR(priv->pagetable[HGSL_GPU_0])) {
+					ret = PTR_ERR(priv->pagetable[HGSL_GPU_0]);
+					(void)hgsl_hyp_device_close(&priv->hyp_priv, &rval, param->device_id);
+					LOGE("Unable to get pagetable for pid=%d", priv->pid);
+				}
+			} else
+				LOGI("No need to create per process PT and use single PT");
+		}
+	} else
+		LOGE("hgsl_hyp_gsl_device_open() failed ret = %d", ret);
+
+out:
+	return ret;
+}
+
+static int hgsl_ioctl_activate_device(
+		struct file *filep,
+		void *data)
+{
+	struct hgsl_priv *priv = filep->private_data;
+	struct qcom_hgsl *hgsl = priv->dev;
+	struct hgsl_ioctl_activate_device_params *param = data;
+	int ret = 0;
+
+	mutex_lock(&hgsl->mutex);
+	/*
+	 * If device is already activated, also passed device handle is
+	 * same as activated device handle then return success.
+	 */
+	if ((priv->is_device_activated)
+		&& (priv->active_devicehandle == param->devhandle))
+		goto out;
+
+	ret = hgsl_hyp_activate_device_handle(&priv->hyp_priv, param);
+	if (ret) {
+		LOGE("hgsl_hyp_activate_device_handle() failed for devhandle %d",
+				param->devhandle);
+		goto out;
+	}
+
+	// Store the activated device handle
+	priv->active_devicehandle = param->devhandle;
+	priv->is_device_activated = true;
+
+out:
+	mutex_unlock(&hgsl->mutex);
+	return ret;
+}
+
 static int hgsl_open(struct inode *inodep, struct file *filep)
 {
 	struct hgsl_priv *priv = NULL;
 	struct qcom_hgsl  *hgsl = container_of(inodep->i_cdev,
-					       struct qcom_hgsl, cdev);
+								struct qcom_hgsl, cdev);
 	struct pid *pid = task_tgid(current);
 	struct task_struct *task = pid_task(pid, PIDTYPE_PID);
 	pid_t pid_nr;
@@ -3332,8 +3714,9 @@ static int hgsl_open(struct inode *inodep, struct file *filep)
 
 	priv->mem_mapped = RB_ROOT;
 	priv->mem_allocated = RB_ROOT;
-	mutex_init(&priv->lock);
 	priv->pid = pid_nr;
+	mutex_init(&priv->lock);
+	mutex_init(&priv->sgt_lock);
 
 	ret = hgsl_hyp_init(&priv->hyp_priv, hgsl->dev,
 		priv->pid, task->comm);
@@ -3342,6 +3725,8 @@ static int hgsl_open(struct inode *inodep, struct file *filep)
 
 	priv->dev = hgsl;
 	priv->open_count = 1;
+	priv->active_devicehandle = GSL_HANDLE_NULL;
+	priv->is_device_activated = false;
 
 	list_add(&priv->node, &hgsl->active_list);
 	hgsl_sysfs_client_init(priv);
@@ -3361,6 +3746,10 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 	struct rb_node *next = NULL;
 	int ret = 0;
 	struct hgsl_hab_channel_t *hab_channel = NULL;
+	struct qcom_hgsl *hgsl = priv->dev;
+	struct hgsl_pagetable *pt = NULL;
+	u32 dev_id = hgsl_hnd2id(priv->active_devicehandle);
+	u32 use_fv = get_fv_status(hgsl, dev_id);
 
 	if (hgsl_mem_rb_empty(priv))
 		goto out;
@@ -3377,15 +3766,25 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 
 	mutex_lock(&priv->lock);
 	next = rb_first(&priv->mem_mapped);
+	/* Single pagetable TTBR0 will be used for both the GPU SMMU context banks */
+	pt = hgsl_get_ctxt_pagetable(priv);
 	while (next) {
 		node_found = rb_entry(next, struct hgsl_mem_node, mem_rb_node);
-		hgsl_put_sgt(node_found, false);
-		ret = hgsl_hyp_mem_unmap_smmu(hab_channel, node_found);
+		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+			ret = hgsl_mmu_unmap(hgsl, pt, node_found, false,
+							priv->active_devicehandle);
+		} else {
+			hgsl_put_sgt(node_found, false);
+			ret = hgsl_hyp_mem_unmap_smmu(hab_channel, node_found);
+		}
 		if (ret)
 			LOGE("Failed to clean mapped buffer %u, 0x%llx, ret %d",
-					node_found->export_id, node_found->memdesc.gpuaddr, ret);
-		else
-			hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
+				node_found->export_id, node_found->memdesc.gpuaddr, ret);
+
+		// For full virtualization release GPU address back if FE unmapping is successful.
+		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
+			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
+		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
 
 		next = rb_next(&node_found->mem_rb_node);
 		rb_erase(&node_found->mem_rb_node, &priv->mem_mapped);
@@ -3395,10 +3794,19 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 	next = rb_first(&priv->mem_allocated);
 	while (next) {
 		node_found = rb_entry(next, struct hgsl_mem_node, mem_rb_node);
-		ret = hgsl_hyp_mem_unmap_smmu(hab_channel, node_found);
+		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+			// Single pagetable TTBR0 will be used for both the GPU SMMU context banks
+			ret = hgsl_mmu_unmap(hgsl, pt, node_found, true, priv->active_devicehandle);
+		} else
+			ret = hgsl_hyp_mem_unmap_smmu(hab_channel, node_found);
+
 		if (ret)
 			LOGE("Failed to clean mapped buffer %u, 0x%llx, ret %d",
-					node_found->export_id, node_found->memdesc.gpuaddr, ret);
+							node_found->export_id, node_found->memdesc.gpuaddr, ret);
+
+		// For full virtualization release GPU address back if FE unmapping is successful.
+		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
+			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
 		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
 
 		next = rb_next(&node_found->mem_rb_node);
@@ -3437,6 +3845,9 @@ static int _hgsl_release(struct hgsl_priv *priv)
 	ret = hgsl_cleanup(priv);
 	if (ret)
 		return ret;
+
+	// Destroy the pagetable
+	hgsl_mmu_putpagetable(hgsl_get_ctxt_pagetable(priv));
 
 	hgsl_hyp_close(&priv->hyp_priv);
 
@@ -4042,6 +4453,10 @@ static const struct hgsl_ioctl hgsl_ioctl_func_table[] = {
 			hgsl_ioctl_gpu_command),
 	HGSL_IOCTL_FUNC(HGSL_IOCTL_GPU_AUX_COMMAND,
 			hgsl_ioctl_gpu_aux_command),
+	HGSL_IOCTL_FUNC(HGSL_IOCTL_DEVICE_OPEN,
+			hgsl_ioctl_device_open),
+	HGSL_IOCTL_FUNC(HGSL_IOCTL_ACTIVATE_DEVICE,
+			hgsl_ioctl_activate_device),
 };
 
 static long hgsl_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
@@ -4174,6 +4589,16 @@ static bool hgsl_is_db_off(struct platform_device *pdev)
 	return db_off == 1;
 }
 
+static bool hgsl_is_fv_on(struct platform_device *pdev)
+{
+	uint32_t fv_on = false;
+
+	if (pdev)
+		fv_on = of_property_read_bool(pdev->dev.of_node, "fv-on");
+
+	return (fv_on == true);
+}
+
 static int hgsl_reg_map(struct platform_device *pdev,
 			char *res_name, struct reg *reg)
 {
@@ -4206,8 +4631,7 @@ static int hgsl_reg_map(struct platform_device *pdev,
 	if (devm_request_mem_region(&pdev->dev,
 					reg->paddr, reg->size,
 					res_name) == NULL) {
-		dev_err(&pdev->dev, "request_mem_region  for %s failed\n",
-								res_name);
+		dev_err(&pdev->dev, "request_mem_region for %s failed\n", res_name);
 		ret = -ENODEV;
 		goto exit;
 	}
@@ -4215,8 +4639,7 @@ static int hgsl_reg_map(struct platform_device *pdev,
 	reg->vaddr = devm_ioremap(&pdev->dev, res->start,
 						resource_size(res));
 	if (reg->vaddr == NULL) {
-		dev_err(&pdev->dev, "Unable to remap %s registers\n",
-								res_name);
+		dev_err(&pdev->dev, "Unable to remap %s registers\n", res_name);
 		ret = -ENODEV;
 		goto exit;
 	}
@@ -4284,11 +4707,63 @@ static int hgsl_resume(struct device *dev)
 	return 0;
 }
 
+static int hgsl_bind(struct device *dev)
+{
+	int ret = 0;
+	struct platform_device *pdev = to_platform_device(dev);
+	struct qcom_hgsl *hgsl_dev = platform_get_drvdata(pdev);
+
+	if (!hgsl_dev) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	// Bind all the components to the aggregate driver
+	ret = component_bind_all(dev, hgsl_dev);
+	if (ret)
+		dev_err(dev, "component_bind_all failed, ret %d\n", ret);
+
+out:
+	return ret;
+}
+
+static void hgsl_unbind(struct device *dev)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct qcom_hgsl *hgsl_dev = platform_get_drvdata(pdev);
+
+	// Unbind all the components to the aggregate driver
+	component_unbind_all(dev, hgsl_dev);
+}
+
+static const struct component_master_ops hgsl_component_ops = {
+	.bind = hgsl_bind,
+	.unbind = hgsl_unbind,
+};
+
+static int compare_of(struct device *dev, void *data)
+{
+	return (dev->of_node == data);
+}
+
+static void release_of(struct device *dev, void *data)
+{
+	of_node_put(data);
+}
+
+static const struct of_device_id hgsl_component_match[] = {
+	{.compatible = "qcom,hgsl-smmu-v2"},
+	{.compatible = "qcom,smmu-hgsl-cb"},
+	{},
+};
+
 static int qcom_hgsl_probe(struct platform_device *pdev)
 {
 	struct qcom_hgsl *hgsl_dev;
 	int ret;
 	int i;
+	struct component_match *match = NULL;
+	struct device_node *node = NULL;
 
 	hgsl_dev = devm_kzalloc(&pdev->dev, sizeof(*hgsl_dev), GFP_KERNEL);
 	if (!hgsl_dev)
@@ -4338,14 +4813,82 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 		hgsl_dev->dbq[i].state = DB_STATE_Q_UNINIT;
 	}
 
-	if (!hgsl_dev->db_off)
-		hgsl_init_global_hyp_channel(hgsl_dev);
+	hgsl_dev->fv_on = hgsl_is_fv_on(pdev);
+
+	ret = hgsl_init_global_hyp_channel(hgsl_dev);
+	if (ret) {
+		LOGE("hgsl_init_global_hyp_channel() failed with ret=%d", ret);
+		goto exit_dereg;
+	}
+
+	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
+		hgsl_dev->ipcq_settings[i].devhandle = GSL_HANDLE_DEV0 + i;
+		hgsl_dev->ipcq_settings[i].size = sizeof(struct hgsl_init_param_t);
+		hgsl_dev->ipcq_settings[i].feature_flags = 0; // Reset feature flags
+		/*
+		 * The "fv_on" DT property indicates full virtualization
+		 * is enabled and if its not present then do not enable FV on BE for that GVM.
+		 */
+		if (hgsl_dev->fv_on)
+			hgsl_dev->ipcq_settings[i].feature_flags |= HGSL_FEATURE_MASK_FV;
+
+		ret = hgsl_hyp_query_gvm_setting(&(hgsl_dev->global_hyp),
+				&(hgsl_dev->ipcq_settings[i]), &(hgsl_dev->gvm_settings[i]));
+		if (ret)
+			LOGE("FAILED to query gvm info from backend for device %d", i);
+
+		LOGI("gvm settings dev_num %d mask 0x%x, sid %d, cb %d",
+				i, hgsl_dev->gvm_settings[i].enabled_feature_mask,
+				hgsl_dev->gvm_settings[i].sid, hgsl_dev->gvm_settings[i].cb);
+		LOGI("irq_index %d, irq_bit_pkmd_hfi %d",
+				hgsl_dev->gvm_settings[i].irq_index,
+				hgsl_dev->gvm_settings[i].irq_bit_pkmd_hfi);
+
+		/*
+		 * Report a warning If FV is ON through device tree property but from backend
+		 * its disabled.
+		 */
+		if (hgsl_dev->fv_on) {
+			if (!(hgsl_dev->gvm_settings[i].enabled_feature_mask & HGSL_FEATURE_MASK_FV))
+				LOGW("GPU FV is disabled by backend for GPU %d", i);
+			else
+				LOGI("GPU FV is enabled by backend for GPU %d", i);
+		}
+
+	}
 
 	hgsl_dev->cache_flags.default_iocoherency = of_property_read_bool(pdev->dev.of_node,
 							"default_iocoherency");
 	hgsl_dev->cache_flags.writecombine_enable = of_property_read_bool(pdev->dev.of_node,
 							"writecombine_enable");
 	platform_set_drvdata(pdev, hgsl_dev);
+
+	if (hgsl_dev->fv_on) {
+		for_each_matching_node(node, hgsl_component_match) {
+			if (!of_device_is_available(node)) {
+				LOGW("%s node is not available", node->name);
+				continue;
+			}
+			component_match_add_release(&pdev->dev, &match, release_of,
+					compare_of, node);
+		}
+
+		if (!match) {
+			ret = -ENODEV;
+			LOGE("No match so exiting!!!");
+			goto exit_dereg;
+		}
+
+		/* Register aggregate driver */
+		ret = component_master_add_with_match(&pdev->dev, &hgsl_component_ops, match);
+		if (ret) {
+			dev_err(&pdev->dev, "Error component_master_add_with_match\n");
+			goto exit_dereg;
+		}
+
+		/* TO DO: Set this flag to false after enabling per process page table. */
+		hgsl_dev->use_single_pt = true;
+	}
 	hgsl_sysfs_init(pdev);
 	hgsl_debugfs_init(pdev);
 
@@ -4362,6 +4905,7 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 	struct hgsl_tcsr *tcsr_sender, *tcsr_receiver;
 	struct hgsl_gmugos *gmugos;
 	int i, j;
+	int rval;
 
 	hgsl_dispatch_deinit(hgsl);
 
@@ -4403,6 +4947,21 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 		if (hgsl->dbq[i].state == DB_STATE_Q_INIT_DONE)
 			hgsl_reset_dbq(&hgsl->dbq[i]);
 
+	component_master_del(&pdev->dev, &hgsl_component_ops);
+
+	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
+		(void)hgsl_hyp_device_close(&hgsl->global_hyp, &rval, (i + GSL_DEVICE_0));
+		if (rval)
+			LOGE("Error in hgsl_hyp_device_close() for device handle %d", (i + GSL_HANDLE_DEV0));
+
+		hgsl->device_handle[i] = GSL_HANDLE_NULL;
+	}
+
+	(void)hgsl_hyp_lib_close(&hgsl->global_hyp, 0, &rval);
+	if (rval)
+		LOGW("hgsl_hyp_lib_close() failed");
+
+	hgsl->global_hyp_inited = false;
 	idr_destroy(&hgsl->isync_timeline_idr);
 
 	mutex_destroy(&hgsl->mutex);
@@ -4411,8 +4970,8 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 }
 
 static const struct dev_pm_ops hgsl_pm_ops = {
-	.suspend         = hgsl_suspend,
-	.resume          = hgsl_resume,
+	.suspend = hgsl_suspend,
+	.resume = hgsl_resume,
 };
 
 static const struct of_device_id qcom_hgsl_of_match[] = {
@@ -4424,7 +4983,7 @@ MODULE_DEVICE_TABLE(of, qcom_hgsl_of_match);
 static struct platform_driver qcom_hgsl_driver = {
 	.probe = qcom_hgsl_probe,
 	.remove = qcom_hgsl_remove,
-	.driver  = {
+	.driver = {
 		.name  = "qcom-hgsl",
 		.of_match_table = qcom_hgsl_of_match,
 		.pm = &hgsl_pm_ops,
@@ -4435,9 +4994,15 @@ static int __init hgsl_init(void)
 {
 	int err;
 
+	err = hgsl_mmu_init();
+	if (err) {
+		pr_err("Failed to register hgsl mmu sub driver: %d\n", err);
+		goto exit;
+	}
 	err = platform_driver_register(&qcom_hgsl_driver);
 	if (err) {
 		pr_err("Failed to register hgsl driver: %d\n", err);
+		hgsl_mmu_exit();
 		goto exit;
 	}
 
@@ -4445,6 +5010,7 @@ static int __init hgsl_init(void)
 	err = platform_driver_register(&hgsl_tcsr_driver);
 	if (err) {
 		pr_err("Failed to register hgsl tcsr driver: %d\n", err);
+		hgsl_mmu_exit();
 		platform_driver_unregister(&qcom_hgsl_driver);
 	}
 #endif
@@ -4455,6 +5021,7 @@ exit:
 
 static void __exit hgsl_exit(void)
 {
+	hgsl_mmu_exit();
 	platform_driver_unregister(&qcom_hgsl_driver);
 #if IS_ENABLED(CONFIG_QCOM_HGSL_TCSR_SIGNAL)
 	platform_driver_unregister(&hgsl_tcsr_driver);
