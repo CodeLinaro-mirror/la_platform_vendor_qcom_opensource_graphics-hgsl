@@ -1,7 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2012-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #ifndef GSL_HYP_INCLUDED
@@ -175,6 +175,8 @@ enum gsl_rpc_func_t {
 	RPC_DEVICE_ACTIVATE,
 	RPC_GVM_INIT,
 	RPC_GVM_DEINIT,
+	RPC_NOTIFY_PM_STATE,
+	RPC_GVM_STATE_DUMP,
 	RPC_FUNC_LAST /* insert new func BEFORE this line! */
 };
 
@@ -213,7 +215,7 @@ enum gsl_rpc_server_mode_t {
 	GSL_RPC_SERVER_MODE_LAST
 };
 
-/* frontend i.e. msg type send to be */
+/* frontend i.e. msg type need aligned with be */
 enum hgsl_ipcq_msg_id_t {
 	GSL_IPCQ_SNAPSHOT_DUMP = 1,
 	GSL_IPCQ_INVALID
@@ -353,6 +355,22 @@ struct command_issueib_with_alloc_list_params {
 	uint32_t            timestamp;
 	uint32_t            flags;
 	uint64_t            syncobj;
+};
+
+/* for now only dump gvm ib */
+enum gvm_dump_type_t {
+	IB1_SNAPSHOT_BUF,
+};
+
+struct memory_export_params_t {
+	/* all size are in bytes */
+	uint32_t               size;
+	uint32_t               devhandle;
+	uint32_t               mem_size;
+	uint32_t               used_size;
+	int                    export_id;
+	enum gvm_dump_type_t   mem_type;
+	uint32_t               seq_no;
 };
 
 struct memory_set_metainfo_params_t {
@@ -771,4 +789,7 @@ int hgsl_hyp_gslprofiler_per_proc_gpu_busy(struct hgsl_hyp_priv_t *priv,
 int hgsl_hyp_gslprofiler_per_proc_gpu_pmem(struct hgsl_hyp_priv_t *priv,
 		struct hgsl_ioctl_gslprofiler_per_proc_gpu_pmem_params *hgsl_param,
 		struct gsl_profiler_get_per_proc_gpu_pmem_usage_t *pmem);
+void hgsl_hyp_export_memory(struct hgsl_hyp_priv_t *hyp_priv,
+		uint32_t devhandle, struct hgsl_mem_node *mem_node, uint32_t used_size,
+		uint32_t buf_sizebytes, enum gvm_dump_type_t mem_type, int seq_no);
 #endif

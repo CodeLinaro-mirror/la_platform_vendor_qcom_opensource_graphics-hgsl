@@ -5076,6 +5076,11 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 			continue;
 		}
 
+		ret = hgsl_init_gmugos(pdev, hgsl_dev->device_handle[i],
+		hgsl_dev->irq_index - HGSL_DB_SIGNAL_GMU_GOS_0, RGSGOS_IRQ_MASK);
+		if (ret)
+			LOGE("hgsl_init_gmugos %d failed irq index 0x%x", i, hgsl_dev->irq_index);
+
 		LOGD("gvm settings dev_num %d mask 0x%x, sid %d, cb %d",
 				i, hgsl_dev->gvm_settings[i].enabled_feature_mask,
 				hgsl_dev->gvm_settings[i].sid, hgsl_dev->gvm_settings[i].cb);
@@ -5100,13 +5105,6 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 							"default_iocoherency");
 	hgsl_dev->cache_flags.writecombine_enable = of_property_read_bool(pdev->dev.of_node,
 							"writecombine_enable");
-
-	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
-		ret = hgsl_init_gmugos(pdev, hgsl_dev->device_handle[i],
-			hgsl_dev->irq_index - HGSL_DB_SIGNAL_GMU_GOS_0, RGSGOS_IRQ_MASK);
-		if (ret)
-			LOGE("hgsl_init_gmugos %d failed irq index 0x%x", i, hgsl_dev->irq_index);
-	}
 
 	if (hgsl_dev->fv_on) {
 		for_each_matching_node(node, hgsl_component_match) {
