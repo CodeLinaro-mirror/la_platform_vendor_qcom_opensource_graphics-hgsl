@@ -7,6 +7,8 @@ la_variants = [
     # keep sorted
     "consolidate",
     "perf",
+    "debug-defconfig",
+    "defconfig",
 ]
 
 def get_all_la_variants():

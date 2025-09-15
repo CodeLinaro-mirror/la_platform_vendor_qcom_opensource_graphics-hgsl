@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2006-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #ifndef __HGSL_TYPES_H
@@ -86,6 +86,12 @@
 #define GSL_CONTEXT_FLAG_CLIENT_GENERATED_TS  0x80000000
 
 /****************************************************************************/
+/* GSLProfiler                                                              */
+/****************************************************************************/
+#define GSL_PROFILER_MAX_NUM_PROCESSES 512
+#define GSL_PROFILER_MAX_PROCESS_NAME_LENGTH 96
+
+/****************************************************************************/
 /* other                                                                    */
 /****************************************************************************/
 #define GSL_TIMEOUT_NONE                      0
@@ -108,78 +114,81 @@
 /* device id */
 /*************/
 enum gsl_deviceid_t {
-    GSL_DEVICE_UNUSED = -1,	/* gcc compiler warning fix, unsigned->signed */
-    GSL_DEVICE_ANY    = 0,
-    GSL_DEVICE_3D     = 1,
-    GSL_DEVICE_0      = 2,
-    GSL_DEVICE_1      = 3,
+	GSL_DEVICE_UNUSED = -1, /* gcc compiler warning fix, unsigned->signed */
+	GSL_DEVICE_ANY    = 0,
+	GSL_DEVICE_3D     = 1,
+	GSL_DEVICE_2DVG   = 2,
+	GSL_DEVICE_2DVG_1 = 3,
+	GSL_DEVICE_0      = 4,
+	GSL_DEVICE_1      = 5,
+	GSL_DEVICE_MAX    = 5,
 
-    GSL_DEVICE_FOOBAR = 0x7FFFFFFF
+	GSL_DEVICE_FOOBAR = 0x7FFFFFFF
 };
 
 enum gsl_devhandle_t {
-    GSL_HANDLE_NULL   = 0,
-    GSL_HANDLE_DEV0   = 1,
-    GSL_HANDLE_DEV1   = 2
+	GSL_HANDLE_NULL   = 0,
+	GSL_HANDLE_DEV0   = 1,
+	GSL_HANDLE_DEV1   = 2
 };
 
 /****************************/
 /* shared memory allocation */
 /****************************/
 struct gsl_memdesc_t {
-    union {
-        void         *hostptr;
-        uint64_t     hostptr64;
-    };
-    uint64_t             gpuaddr;
-    union {
-        unsigned int size;
-        uint64_t     size64;
-    };
-    uint64_t             flags;
-    union {
-        uintptr_t    priv;
-        uint64_t     priv64;
-    };
+	union {
+		void            *hostptr;
+		uint64_t        hostptr64;
+	};
+	uint64_t            gpuaddr;
+	union {
+		unsigned int    size;
+		uint64_t        size64;
+	};
+	uint64_t            flags;
+	union {
+		uintptr_t       priv;
+		uint64_t        priv64;
+	};
 };
 
 struct gsl_command_buffer_object_t {
-    struct gsl_memdesc_t		*memdesc;
-    uint64_t			sizedwords;
-    uint64_t			offset;
-    uint64_t			flags;
+	struct gsl_memdesc_t        *memdesc;
+	uint64_t            sizedwords;
+	uint64_t            offset;
+	uint64_t            flags;
 };
 
 struct gsl_memory_object_t {
-    struct gsl_memdesc_t		*memdesc;
-    uint64_t			sizedwords;
-    uint64_t			offset;
-    uint64_t			flags;
+	struct gsl_memdesc_t        *memdesc;
+	uint64_t            sizedwords;
+	uint64_t            offset;
+	uint64_t            flags;
 };
 
 /****************/
 /* timestamp id */
 /****************/
 enum gsl_timestamp_type_t {
-    GSL_TIMESTAMP_CONSUMED = 1, /* start-of-pipeline timestamp */
-    GSL_TIMESTAMP_RETIRED  = 2, /* end-of-pipeline timestamp */
-    GSL_TIMESTAMP_QUEUED   = 3, /* Timestamp of last submitted IB */
-    GSL_TIMESTAMP_MAX      = 3,
+	GSL_TIMESTAMP_CONSUMED = 1, /* start-of-pipeline timestamp */
+	GSL_TIMESTAMP_RETIRED  = 2, /* end-of-pipeline timestamp */
+	GSL_TIMESTAMP_QUEUED   = 3, /* Timestamp of last submitted IB */
+	GSL_TIMESTAMP_MAX      = 3,
 
-    GSL_TIMESTAMP_FOOBAR   = 0x7FFFFFFF
+	GSL_TIMESTAMP_FOOBAR   = 0x7FFFFFFF
 };
 
 enum gsl_context_type_t {
-    GSL_CONTEXT_TYPE_GENERIC = 1,
-    GSL_CONTEXT_TYPE_OPENGL	 = 2,
-    GSL_CONTEXT_TYPE_OPENVG	 = 3,
-    GSL_CONTEXT_TYPE_OPENCL	 = 4,
-    GSL_CONTEXT_TYPE_C2D     = 5,
-    GSL_CONTEXT_TYPE_RS      = 6,
-    GSL_CONTEXT_TYPE_DX      = 7,
-    GSL_CONTEXT_TYPE_VK      = 8,
+	GSL_CONTEXT_TYPE_GENERIC = 1,
+	GSL_CONTEXT_TYPE_OPENGL  = 2,
+	GSL_CONTEXT_TYPE_OPENVG  = 3,
+	GSL_CONTEXT_TYPE_OPENCL  = 4,
+	GSL_CONTEXT_TYPE_C2D     = 5,
+	GSL_CONTEXT_TYPE_RS      = 6,
+	GSL_CONTEXT_TYPE_DX      = 7,
+	GSL_CONTEXT_TYPE_VK      = 8,
 
-    GSL_CONTEXT_TYPE_FOOBAR  = 0x7FFFFFFF
+	GSL_CONTEXT_TYPE_FOOBAR  = 0x7FFFFFFF
 };
 
 
@@ -187,49 +196,77 @@ enum gsl_context_type_t {
 /* Performance Counter Group */
 /*****************************/
 enum gsl_perfcountergroupid_t {
-    GSL_PERF_COUNTER_GROUP_INVALID  = -1,
-    GSL_PERF_COUNTER_GROUP_CP       = 0x0,
-    GSL_PERF_COUNTER_GROUP_RBBM     = 0x1,
-    GSL_PERF_COUNTER_GROUP_PC       = 0x2,
-    GSL_PERF_COUNTER_GROUP_VFD      = 0x3,
-    GSL_PERF_COUNTER_GROUP_HLSQ     = 0x4,
-    GSL_PERF_COUNTER_GROUP_VPC      = 0x5,
-    GSL_PERF_COUNTER_GROUP_TSE      = 0x6,
-    GSL_PERF_COUNTER_GROUP_RAS      = 0x7,
-    GSL_PERF_COUNTER_GROUP_UCHE     = 0x8,
-    GSL_PERF_COUNTER_GROUP_TP       = 0x9,
-    GSL_PERF_COUNTER_GROUP_SP       = 0xA,
-    GSL_PERF_COUNTER_GROUP_RB       = 0xB,
-    GSL_PERF_COUNTER_GROUP_PWR      = 0xC,
-    GSL_PERF_COUNTER_GROUP_VBIF     = 0xD,
-    GSL_PERF_COUNTER_GROUP_VBIF_PWR = 0xE,
-    GSL_PERF_COUNTER_GROUP_MH       = 0xF,
-    GSL_PERF_COUNTER_GROUP_PA_SU    = 0x10,
-    GSL_PERF_COUNTER_GROUP_SQ       = 0x11,
-    GSL_PERF_COUNTER_GROUP_SX       = 0x12,
-    GSL_PERF_COUNTER_GROUP_TCF      = 0x13,
-    GSL_PERF_COUNTER_GROUP_TCM      = 0x14,
-    GSL_PERF_COUNTER_GROUP_TCR      = 0x15,
-    GSL_PERF_COUNTER_GROUP_L2       = 0x16,
-    GSL_PERF_COUNTER_GROUP_VSC      = 0x17,
-    GSL_PERF_COUNTER_GROUP_CCU      = 0x18,
-    GSL_PERF_COUNTER_GROUP_LRZ      = 0x19,
-    GSL_PERF_COUNTER_GROUP_CMP      = 0x1A,
-    GSL_PERF_COUNTER_GROUP_ALWAYSON = 0x1B,
-    GSL_PERF_COUNTER_GROUP_SW       = 0x1C,
-    GSL_PERF_COUNTER_GROUP_GMU_PWC  = 0x1D,
-    GSL_PERF_COUNTER_GROUP_GLC      = 0x1E,
-    GSL_PERF_COUNTER_GROUP_FCHE     = 0x1F,
-    GSL_PERF_COUNTER_GROUP_MHUB     = 0x20,
-    GSL_PERF_COUNTER_GROUP_MAX
+	GSL_PERF_COUNTER_GROUP_INVALID  = -1,
+	GSL_PERF_COUNTER_GROUP_CP       = 0x0,
+	GSL_PERF_COUNTER_GROUP_RBBM     = 0x1,
+	GSL_PERF_COUNTER_GROUP_PC       = 0x2,
+	GSL_PERF_COUNTER_GROUP_VFD      = 0x3,
+	GSL_PERF_COUNTER_GROUP_HLSQ     = 0x4,
+	GSL_PERF_COUNTER_GROUP_VPC      = 0x5,
+	GSL_PERF_COUNTER_GROUP_TSE      = 0x6,
+	GSL_PERF_COUNTER_GROUP_RAS      = 0x7,
+	GSL_PERF_COUNTER_GROUP_UCHE     = 0x8,
+	GSL_PERF_COUNTER_GROUP_TP       = 0x9,
+	GSL_PERF_COUNTER_GROUP_SP       = 0xA,
+	GSL_PERF_COUNTER_GROUP_RB       = 0xB,
+	GSL_PERF_COUNTER_GROUP_PWR      = 0xC,
+	GSL_PERF_COUNTER_GROUP_VBIF     = 0xD,
+	GSL_PERF_COUNTER_GROUP_VBIF_PWR = 0xE,
+	GSL_PERF_COUNTER_GROUP_MH       = 0xF,
+	GSL_PERF_COUNTER_GROUP_PA_SU    = 0x10,
+	GSL_PERF_COUNTER_GROUP_SQ       = 0x11,
+	GSL_PERF_COUNTER_GROUP_SX       = 0x12,
+	GSL_PERF_COUNTER_GROUP_TCF      = 0x13,
+	GSL_PERF_COUNTER_GROUP_TCM      = 0x14,
+	GSL_PERF_COUNTER_GROUP_TCR      = 0x15,
+	GSL_PERF_COUNTER_GROUP_L2       = 0x16,
+	GSL_PERF_COUNTER_GROUP_VSC      = 0x17,
+	GSL_PERF_COUNTER_GROUP_CCU      = 0x18,
+	GSL_PERF_COUNTER_GROUP_LRZ      = 0x19,
+	GSL_PERF_COUNTER_GROUP_CMP      = 0x1A,
+	GSL_PERF_COUNTER_GROUP_ALWAYSON = 0x1B,
+	GSL_PERF_COUNTER_GROUP_SW       = 0x1C,
+	GSL_PERF_COUNTER_GROUP_GMU_PWC  = 0x1D,
+	GSL_PERF_COUNTER_GROUP_GLC      = 0x1E,
+	GSL_PERF_COUNTER_GROUP_FCHE     = 0x1F,
+	GSL_PERF_COUNTER_GROUP_MHUB     = 0x20,
+	GSL_PERF_COUNTER_GROUP_MAX
 };
 
 /****************************************************************************/
 /* system time usage                                                        */
 /****************************************************************************/
 enum gsl_systemtime_usage_t {
-    GSL_SYSTEMTIME_GENERIC		= 0x0,
-    GSL_SYSTEMTIME_CL_PROFILING	= 0x1,
+	GSL_SYSTEMTIME_GENERIC      = 0x0,
+	GSL_SYSTEMTIME_CL_PROFILING = 0x1,
 };
 
-#endif	/* __HGSL_TYPES_H */
+/****************************************************************************/
+/* GSLProfiler                                                              */
+/****************************************************************************/
+struct gsl_profiler_get_per_proc_gpu_busy_percentage_t {
+	/* Total number of active processes */
+	unsigned int        process_num;
+	/* Holds the process id of active processes */
+	unsigned int        process_id[GSL_PROFILER_MAX_NUM_PROCESSES];
+	/* Holds the names of active processes */
+	char process_name[GSL_PROFILER_MAX_NUM_PROCESSES][GSL_PROFILER_MAX_PROCESS_NAME_LENGTH];
+	/* Holds the percentage busy-ness of GPU */
+	double              busy_percentage[GSL_PROFILER_MAX_NUM_PROCESSES];
+	/* A specific timestamp that holds end time of the period of calculation */
+	unsigned long long  ts;
+};
+
+struct gsl_profiler_get_per_proc_gpu_pmem_usage_t {
+	/* Total number of active processes */
+	unsigned int        process_num;
+	/* Holds the process id of active processes */
+	unsigned int        process_id[GSL_PROFILER_MAX_NUM_PROCESSES];
+	/* Holds the names of active processes */
+	char process_name[GSL_PROFILER_MAX_NUM_PROCESSES][GSL_PROFILER_MAX_PROCESS_NAME_LENGTH];
+	/* Holds the GPU PMEM usage in bytes */
+	unsigned int        pmem_usage[GSL_PROFILER_MAX_NUM_PROCESSES];
+	/* A specific timestamp that holds the time the data are retrieved */
+	unsigned long long  ts;
+};
+#endif  /* __HGSL_TYPES_H */
