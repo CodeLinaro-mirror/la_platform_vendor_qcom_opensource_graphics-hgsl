@@ -4118,6 +4118,64 @@ static int hgsl_ioctl_timeline_wait(
 	return hgsl_isync_wait_multiple(priv, param);
 }
 
+static int hgsl_ioctl_gslprofiler_per_proc_gpu_busy(struct file *filep, void *data)
+{
+	struct hgsl_priv *priv = filep->private_data;
+	struct hgsl_ioctl_gslprofiler_per_proc_gpu_busy_params *param = data;
+	struct gsl_profiler_get_per_proc_gpu_busy_percentage_t *busy = NULL;
+	int ret = 0;
+
+	busy = hgsl_malloc(sizeof(struct gsl_profiler_get_per_proc_gpu_busy_percentage_t));
+	if (busy == NULL) {
+		LOGE("failed to allocate memory");
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = hgsl_hyp_gslprofiler_per_proc_gpu_busy(&priv->hyp_priv, param, busy);
+	if (ret == 0) {
+		if (copy_to_user(USRPTR(param->busy), busy,
+				sizeof(struct gsl_profiler_get_per_proc_gpu_busy_percentage_t))) {
+			LOGE("failed to copy busy to user");
+			ret = -EFAULT;
+			goto out;
+		}
+	}
+
+out:
+	hgsl_free(busy);
+	return ret;
+}
+
+static int hgsl_ioctl_gslprofiler_per_proc_gpu_pmem(struct file *filep, void *data)
+{
+	struct hgsl_priv *priv = filep->private_data;
+	struct hgsl_ioctl_gslprofiler_per_proc_gpu_pmem_params *param = data;
+	struct gsl_profiler_get_per_proc_gpu_pmem_usage_t *pmem = NULL;
+	int ret = 0;
+
+	pmem = hgsl_malloc(sizeof(struct gsl_profiler_get_per_proc_gpu_pmem_usage_t));
+	if (pmem == NULL) {
+		LOGE("failed to allocate memory");
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = hgsl_hyp_gslprofiler_per_proc_gpu_pmem(&priv->hyp_priv, param, pmem);
+	if (ret == 0) {
+		if (copy_to_user(USRPTR(param->pmem), pmem,
+				sizeof(struct gsl_profiler_get_per_proc_gpu_pmem_usage_t))) {
+			LOGE("failed to copy pmem to user");
+			ret = -EFAULT;
+			goto out;
+		}
+	}
+
+out:
+	hgsl_free(pmem);
+	return ret;
+}
+
 /* Returns 0 on failure.  Returns command type(s) on success */
 static u32 _get_command_type(
 	u64 flags, u32 numcmds,
@@ -4449,6 +4507,10 @@ static const struct hgsl_ioctl hgsl_ioctl_func_table[] = {
 			hgsl_ioctl_timeline_query),
 	HGSL_IOCTL_FUNC(HGSL_IOCTL_TIMELINE_WAIT,
 			hgsl_ioctl_timeline_wait),
+	HGSL_IOCTL_FUNC(HGSL_IOCTL_GSLPROFILER_PER_PROC_GPU_BUSY,
+			hgsl_ioctl_gslprofiler_per_proc_gpu_busy),
+	HGSL_IOCTL_FUNC(HGSL_IOCTL_GSLPROFILER_PER_PROC_GPU_PMEM,
+			hgsl_ioctl_gslprofiler_per_proc_gpu_pmem),
 	HGSL_IOCTL_FUNC(HGSL_IOCTL_GPU_COMMAND,
 			hgsl_ioctl_gpu_command),
 	HGSL_IOCTL_FUNC(HGSL_IOCTL_GPU_AUX_COMMAND,

@@ -462,6 +462,15 @@ struct context_create_params_v1_t {
 	uint32_t                            dbq_off;
 };
 
+struct gslprofiler_per_proc_gpu_busy_params {
+	uint32_t                size;
+	uint32_t                sampling_time;
+};
+
+struct gslprofiler_per_proc_gpu_pmem_params {
+	uint32_t                size;
+};
+
 struct device_activate_params {
 	uint32_t                size;
 	uint32_t                devhandle;
@@ -696,4 +705,12 @@ int hgsl_hyp_ctxt_create_v2(struct device *dev,
 	struct hgsl_hab_channel_t *hab_channel,
 	struct hgsl_context *ctxt,
 	struct hgsl_ioctl_ctxt_create_params *hgsl_params);
+
+int hgsl_hyp_gslprofiler_per_proc_gpu_busy(struct hgsl_hyp_priv_t *priv,
+		struct hgsl_ioctl_gslprofiler_per_proc_gpu_busy_params *hgsl_param,
+		struct gsl_profiler_get_per_proc_gpu_busy_percentage_t *busy);
+
+int hgsl_hyp_gslprofiler_per_proc_gpu_pmem(struct hgsl_hyp_priv_t *priv,
+		struct hgsl_ioctl_gslprofiler_per_proc_gpu_pmem_params *hgsl_param,
+		struct gsl_profiler_get_per_proc_gpu_pmem_usage_t *pmem);
 #endif
