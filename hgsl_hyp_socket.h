@@ -21,11 +21,11 @@ int gsl_hab_send(int habfd, unsigned char *p, size_t sz);
 int gsl_hab_close(int habfd);
 
 struct gsl_hab_payload {
-    uint32_t                version;
-    size_t                  data_size;
-    size_t                  data_pos;
-    size_t                  send_size;
-    uint8_t                 *data;
+	uint32_t                version;
+	size_t                  data_size;
+	size_t                  data_pos;
+	size_t                  send_size;
+	uint8_t                 *data;
 };
 
 int gsl_rpc_read(struct gsl_hab_payload *p, void *outData, size_t len);
@@ -44,12 +44,12 @@ void gsl_rpc_parcel_free(struct gsl_hab_payload *p);
 int gsl_rpc_parcel_reset(struct gsl_hab_payload *p);
 int gsl_rpc_parcel_rest_ext(struct gsl_hab_payload *p, uint32_t version);
 int gsl_rpc_set_call_params(struct gsl_hab_payload *p,
-    uint32_t opcode, uint32_t version);
+	uint32_t opcode, uint32_t version);
 int gsl_rpc_finalize(struct gsl_hab_payload *p);
 int gsl_rpc_get_call_params(struct gsl_hab_payload *p,
-    uint32_t *opcode, uint32_t *version);
+	uint32_t *opcode, uint32_t *version);
 int gsl_rpc_get_data_params(struct gsl_hab_payload *p,
-    void **p_data, uint32_t *size, uint32_t *max_size);
+	void **p_data, uint32_t *size, uint32_t *max_size);
 void gsl_hab_payload_dump(struct gsl_hab_payload *p, size_t size);
 int grow_data(struct gsl_hab_payload *p, size_t len);
 uint32_t gsl_rpc_parcel_get_version(struct gsl_hab_payload *p);
