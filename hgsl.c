@@ -2436,12 +2436,10 @@ static int hgsl_ioctl_mem_alloc(
 		goto exit;
 	}
 
-	if (!use_fv) {
-		ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
-		if (ret) {
-			LOGE("Failed to get hab channel %d", ret);
-			goto out;
-		}
+	ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
+	if (ret) {
+		LOGE("Failed to get hab channel %d", ret);
+		goto out;
 	}
 
 	mem_node = hgsl_mem_node_zalloc(hgsl->cache_flags);
@@ -2520,8 +2518,7 @@ out:
 			put_unused_fd(mem_fd);
 	}
 
-	if (!use_fv)
-		hgsl_hyp_channel_pool_put(hab_channel);
+	hgsl_hyp_channel_pool_put(hab_channel);
 
 exit:
 	return ret;
@@ -2555,13 +2552,12 @@ static int hgsl_ioctl_mem_free(
 		goto exit;
 	}
 
-	if (!use_fv) {
-		ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
-		if (ret) {
-			LOGE("Failed to get hab channel %d", ret);
-			goto out;
-		}
+	ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
+	if (ret) {
+		LOGE("Failed to get hab channel %d", ret);
+		goto out;
 	}
+
 	mutex_lock(&priv->lock);
 	node_found = hgsl_mem_find_node_locked(&priv->mem_allocated,
 					memdesc.gpuaddr, memdesc.size64, true);
@@ -2596,8 +2592,7 @@ static int hgsl_ioctl_mem_free(
 		LOGE("can't find the memory 0x%llx, 0x%x", memdesc.gpuaddr, memdesc.size);
 
 out:
-	if (!use_fv)
-		hgsl_hyp_channel_pool_put(hab_channel);
+	hgsl_hyp_channel_pool_put(hab_channel);
 
 exit:
 	return ret;
@@ -2686,12 +2681,10 @@ static int hgsl_ioctl_mem_map_smmu(
 		goto exit;
 	}
 
-	if (!use_fv) {
-		ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
-		if (ret) {
-			LOGE("Failed to get hab channel %d", ret);
-			goto out;
-		}
+	ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
+	if (ret) {
+		LOGE("Failed to get hab channel %d", ret);
+		goto out;
 	}
 
 	mem_node = hgsl_mem_node_zalloc(hgsl->cache_flags);
@@ -2755,8 +2748,7 @@ out:
 		hgsl_free(mem_node);
 	}
 
-	if (!use_fv)
-		hgsl_hyp_channel_pool_put(hab_channel);
+	hgsl_hyp_channel_pool_put(hab_channel);
 
 exit:
 	return ret;
@@ -2782,12 +2774,10 @@ static int hgsl_ioctl_mem_unmap_smmu(
 		goto exit;
 	}
 
-	if (!use_fv) {
-		ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
-		if (ret) {
-			LOGE("Failed to get hab channel %d", ret);
-			goto out;
-		}
+	ret = hgsl_hyp_channel_pool_get(&priv->hyp_priv, 0, &hab_channel);
+	if (ret) {
+		LOGE("Failed to get hab channel %d", ret);
+		goto out;
 	}
 
 	mutex_lock(&priv->lock);
@@ -2828,8 +2818,7 @@ static int hgsl_ioctl_mem_unmap_smmu(
 		ret = -EINVAL;
 
 out:
-	if (!use_fv)
-		hgsl_hyp_channel_pool_put(hab_channel);
+	hgsl_hyp_channel_pool_put(hab_channel);
 
 exit:
 	return ret;
@@ -4896,8 +4885,10 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 
 		ret = hgsl_hyp_query_gvm_setting(&(hgsl_dev->global_hyp),
 				&(hgsl_dev->ipcq_settings[i]), &(hgsl_dev->gvm_settings[i]));
-		if (ret)
+		if (ret) {
 			LOGE("FAILED to query gvm info from backend for device %d", i);
+			continue;
+		}
 
 		LOGI("gvm settings dev_num %d mask 0x%x, sid %d, cb %d",
 				i, hgsl_dev->gvm_settings[i].enabled_feature_mask,
