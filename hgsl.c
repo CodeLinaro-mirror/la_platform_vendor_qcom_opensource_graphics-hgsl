@@ -3573,7 +3573,7 @@ static int hgsl_ioctl_device_open(
 	u32 use_fv = 0;
 
 	ret = hgsl_hyp_device_open(&priv->hyp_priv, param->flags, param->device_id, &dev_handle);
-	LOGI("device handle returned is %d", dev_handle);
+	LOGD("device handle returned is %d", dev_handle);
 	if (ret == 0) {
 		if ((dev_handle != GSL_HANDLE_DEV0) && (dev_handle != GSL_HANDLE_DEV1)) {
 			ret = -EINVAL;
@@ -3629,7 +3629,7 @@ static int hgsl_ioctl_device_open(
 					LOGE("Unable to get pagetable for pid=%d", priv->pid);
 				}
 			} else
-				LOGI("No need to create per process PT and use single PT");
+				LOGD("No need to create per process PT and use single PT");
 		}
 	} else
 		LOGE("hgsl_hyp_gsl_device_open() failed ret = %d", ret);
