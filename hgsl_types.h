@@ -84,6 +84,13 @@
 #define GSL_CONTEXT_FLAG_USER_GENERATED_TS    0x00000080
 #define GSL_CONTEXT_FLAG_BIND                 0x00040000
 #define GSL_CONTEXT_FLAG_CLIENT_GENERATED_TS  0x80000000
+#define GSL_CONTEXT_FLAG_USES_PROTECTED       0x00020000
+
+/****************************************************************************/
+/* GSLProfiler                                                              */
+/****************************************************************************/
+#define GSL_PROFILER_MAX_NUM_PROCESSES 512
+#define GSL_PROFILER_MAX_PROCESS_NAME_LENGTH 96
 
 /****************************************************************************/
 /* GSLProfiler                                                              */
