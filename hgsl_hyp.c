@@ -2793,10 +2793,20 @@ static int write_ctxt_create_data_fv(struct qcom_hgsl *hgsl_dev,
 	struct context_create_params_t *ctxt_create_p = &rpc_v2_params.ctxt_create_param;
 	int ret = 0;
 
-	if (!ctxt_rec_mem_node) {
-		LOGE("ctxt record mem node is invalid");
-		ret = -EINVAL;
-		goto out;
+	/*
+	 * For secure context, context record buffer is alloacated in frontend
+	 * host driver so send context record buffer's gpu address as 0, otherwise for
+	 * non secure context map the buffer in front  end and send the GPU address after
+	 * mapping so that host can send the same to GMU.
+	 */
+	if (!(hgsl_params->flags & GSL_CONTEXT_FLAG_USES_PROTECTED)) {
+		if (ctxt_rec_mem_node)
+			rpc_v2_params.ctxt_record_mem_gpu_addr = ctxt_rec_mem_node->memdesc.gpuaddr;
+		else {
+			LOGE("ctxt record mem node is invalid");
+			ret = -EINVAL;
+			goto out;
+		}
 	}
 
 	ctxt_create_p->size = sizeof(*ctxt_create_p);
@@ -2817,7 +2827,6 @@ static int write_ctxt_create_data_fv(struct qcom_hgsl *hgsl_dev,
 	// TO DO: Need to get TTBR0 value from IOMMU API as of now send 0xDEAD to BE.
 	//rpc_v2_params.ttbr0 =  hgsl_mmu_pagetable_get_ttbr0(priv->pagetable[HGSL_GPU_0]);
 
-	rpc_v2_params.ctxt_record_mem_gpu_addr =  ctxt_rec_mem_node->memdesc.gpuaddr;
 	rpc_v2_params.size = sizeof(rpc_v2_params);
 
 #if IS_ENABLED(CONFIG_DEBUG_FV)
@@ -3199,55 +3208,57 @@ int hgsl_hyp_ctxt_create_v2(struct device *dev,
 		goto out;
 	}
 
-	size_bytes = (hgsl->gvm_settings[dev_id].ctxt_rec_buf_size_KB * 1024);
-	LOGD("Allocating context record buffer of size %u aligned size %u",
-					size_bytes, PAGE_ALIGN(size_bytes));
-	if (size_bytes > 0) {
-		ctxt_record_mem_node = hgsl_mem_node_zalloc(hgsl->cache_flags);
-		if (ctxt_record_mem_node == NULL) {
-			ret = -ENOMEM;
+	if (!(hgsl_params->flags & GSL_CONTEXT_FLAG_USES_PROTECTED)) {
+		size_bytes = (hgsl->gvm_settings[dev_id].ctxt_rec_buf_size_KB * 1024);
+		LOGD("Allocating context record buffer of size %u aligned size %u",
+						size_bytes, PAGE_ALIGN(size_bytes));
+		if (size_bytes > 0) {
+			ctxt_record_mem_node = hgsl_mem_node_zalloc(hgsl->cache_flags);
+			if (ctxt_record_mem_node == NULL) {
+				ret = -ENOMEM;
+				goto out;
+			}
+
+			ctxt_record_mem_node->fd = -1;
+			ctxt_record_mem_node->mem_node_iommu_info.ptr_hgsl_priv = priv;
+			ret = hgsl_sharedmem_alloc(dev, size_bytes, 0, ctxt_record_mem_node);
+			if (ret) {
+				LOGE("Error im memory allocation for context record buffer");
+				goto out;
+			}
+		} else {
+			ret = -EINVAL;
+			LOGE("Invalid context record user buffer size! Exit");
 			goto out;
 		}
 
-		ctxt_record_mem_node->fd = -1;
-		ctxt_record_mem_node->mem_node_iommu_info.ptr_hgsl_priv = priv;
-		ret = hgsl_sharedmem_alloc(dev, size_bytes, 0, ctxt_record_mem_node);
+		pt = hgsl_get_ctxt_pagetable(priv);
+		// For full virtualization, we need to map this shadowts_mem buffer in front end
+		ret = hgsl_mmu_get_gpuaddr(pt, ctxt_record_mem_node, hgsl->use_single_pt);
 		if (ret) {
-			LOGE("Error im memory allocation for context record buffer");
+			LOGE("Error getting unused GPU address");
+			ret = -EINVAL;
 			goto out;
 		}
-	} else {
-		ret = -EINVAL;
-		LOGE("Invalid context record user buffer size! Exit");
-		goto out;
-	}
 
-	pt = hgsl_get_ctxt_pagetable(priv);
-	// For full virtualization, we need to map this shadowts_mem buffer in front end
-	ret = hgsl_mmu_get_gpuaddr(pt, ctxt_record_mem_node, hgsl->use_single_pt);
-	if (ret) {
-		LOGE("Error getting unused GPU address");
-		ret = -EINVAL;
-		goto out;
-	}
+		// Single pagetable TTBR0 will be used for both the GPU SMMU context banks
+		ret = hgsl_mmu_map(hgsl, pt, ctxt_record_mem_node, true, hgsl_params->devhandle);
 
-	// Single pagetable TTBR0 will be used for both the GPU SMMU context banks
-	ret = hgsl_mmu_map(hgsl, pt, ctxt_record_mem_node, true, hgsl_params->devhandle);
+		if (ret) {
+			LOGE("Error while mapping context record buffer");
+			goto out;
+		}
 
-	if (ret) {
-		LOGE("Error while mapping context record buffer");
-		goto out;
+		mutex_lock(&priv->lock);
+		ret = hgsl_mem_add_node(&priv->mem_allocated, ctxt_record_mem_node);
+		if (likely(!ret)) {
+			hgsl_trace_gpu_mem_total(priv, ctxt_record_mem_node->memdesc.size64);
+			ctxt_node_added = true;
+		}
+		mutex_unlock(&priv->lock);
+		if (ret)
+			goto out;
 	}
-
-	mutex_lock(&priv->lock);
-	ret = hgsl_mem_add_node(&priv->mem_allocated, ctxt_record_mem_node);
-	if (likely(!ret)) {
-		hgsl_trace_gpu_mem_total(priv, ctxt_record_mem_node->memdesc.size64);
-		ctxt_node_added = true;
-	}
-	mutex_unlock(&priv->lock);
-	if (ret)
-		goto out;
 
 	ret = write_ctxt_create_data_fv(hgsl, hab_channel, shadow_mem_node,
 			ctxt_record_mem_node, hgsl_params, priv);
