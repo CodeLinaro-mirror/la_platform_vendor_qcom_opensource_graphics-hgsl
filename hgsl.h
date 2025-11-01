@@ -566,6 +566,7 @@ struct hgsl_isync_timeline {
 	struct list_head fence_list;
 	u64 context;
 	spinlock_t lock;
+	spinlock_t fence_list_lock;
 	u64 last_ts;
 	u32 flags;
 	bool is64bits;
