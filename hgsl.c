@@ -5009,6 +5009,7 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	hgsl_dev->dev = &pdev->dev;
+	platform_set_drvdata(pdev, hgsl_dev);
 
 	ret = qcom_hgsl_register(pdev, hgsl_dev);
 	if (ret < 0) {
@@ -5099,7 +5100,6 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 							"default_iocoherency");
 	hgsl_dev->cache_flags.writecombine_enable = of_property_read_bool(pdev->dev.of_node,
 							"writecombine_enable");
-	platform_set_drvdata(pdev, hgsl_dev);
 
 	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
 		ret = hgsl_init_gmugos(pdev, hgsl_dev->device_handle[i],
