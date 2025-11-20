@@ -44,7 +44,7 @@
  *   |   reply(result, return call data)    |
  *   | -----------------------------------> |
  *   |                                      |
- *   |              ...                     |
+ *   |                                      |
  */
 
 /*
@@ -74,499 +74,701 @@
 
 #define RPC_CLIENT_NAME_SIZE (64)
 
+#define USER_TS_BUFFER_SIZE_IN_BYTES (PAGE_SIZE)
+#define OFFSETOF_IPCQ_HEADER_ELEM(elem)  offsetof(struct HfiQueueHeader, elem)
+#define OFFSET_OF_TYPE_ELEM(type, elem)  offsetof(type, elem)
+#define MAX_HFI_MSG_SIZE                 (0xFF)
+#define HGSL_PER_CTXT_MAX_IB_NUM         (2)
+
 struct hgsl_context;
 struct hgsl_priv;
+struct qcom_hgsl;
 
 /* RPC opcodes */
 /* WARNING: when inserting new opcode, please insert it to the end before RPC_FUNC_LAST */
 /* Inserting the new opcode in the middle of the list will break the protocol ! */
 enum gsl_rpc_func_t {
-    RPC_LIBRARY_OPEN = 0,
-    RPC_LIBRARY_CLOSE,
-    RPC_LIBRARY_VERSION,
-    RPC_LIBRARY_SET_MEMNOTIFY_TYPE,
-    RPC_DEVICE_OPEN,
-    RPC_DEVICE_CLOSE,
-    RPC_DEVICE_GETINFO,
-    RPC_DEVICE_GETINFO_EXT,
-    RPC_DEVICE_SETPOWERSTATE,
-    RPC_DEVICE_WAITIRQ,
-    RPC_DEVICE_GETIRQCNTRBASE,
-    RPC_DEVICE_DUMPSTATE,
-    RPC_COMMAND_ISSUEIB,
-    RPC_COMMAND_INSERTFENCE,
-    RPC_COMMAND_READTIMESTAMP,
-    RPC_COMMAND_ISSUEIB_SYNC,
-    RPC_COMMAND_ISSUEIB_WITH_ALLOC_LIST,
-    RPC_COMMAND_CHECKTIMESTAMP,
-    RPC_COMMAND_WAITTIMESTAMP,
-    RPC_COMMAND_FREEMEMONTIMESTAMP,
-    RPC_COMMAND_RESETSTATUS_INTERNAL,
-    RPC_CONTEXT_CREATE,
-    RPC_CONTEXT_DESTROY,
-    RPC_CONTEXT_BINDGMEMSHADOW,
-    RPC_CONTEXT_SETBINBASEOFFSET,
-    RPC_MEMORY_READ,
-    RPC_MEMORY_WRITE,
-    RPC_MEMORY_COPY,
-    RPC_MEMORY_SET,
-    RPC_MEMORY_QUERYSTATS,
-    RPC_MEMORY_ALLOC_PURE,
-    RPC_MEMORY_PHYS_ALLOC_PURE,
-    RPC_MEMORY_VIRT_ALLOC_PURE,
-    RPC_MEMORY_FREE_PURE,
-    RPC_MEMORY_CACHEOPERATION,
-    RPC_MEMORY_NOTIFY,
-    RPC_MEMORY_BIND,
-    RPC_MEMORY_BIND_SYNC,
-    RPC_MEMORY_MMAP,
-    RPC_MEMORY_MUNMAP,
-    RPC_MEMORY_CREATE_PAGETABLE,
-    RPC_MEMORY_DESTROY_PAGETABLE,
-    RPC_MEMORY_SET_PAGETABLE,
-    RPC_COMMAND_FREEMEMONTIMESTAMP_PURE,
-    RPC_PERFCOUNTER_SELECT,
-    RPC_PERFCOUNTER_DESELECT,
-    RPC_PERFCOUNTER_QUERYSELECTIONS,
-    RPC_PERFCOUNTER_READ,
-    RPC_SYNCOBJ_CREATE,
-    RPC_SYNCOBJ_CREATE_FROM_BIND,
-    RPC_SYNCOBJ_DESTROY,
-    RPC_SYNCOBJ_WAIT,
-    RPC_TIMESTAMP_CMP,
-    RPC_SYNCOBJ_CLONE,
-    RPC_SYNCOBJ_MERGE,
-    RPC_SYNCOBJ_MERGE_MULTIPLE,
-    RPC_SYNCSOURCE_CREATE,
-    RPC_SYNCSOURCE_DESTROY,
-    RPC_SYNCOBJ_CREATE_FROM_SOURCE,
-    RPC_SYNCOBJ_SIGNAL,
-    RPC_SYNCOBJ_WAIT_MULTIPLE,
-    RPC_DEVICE_DEBUG,
-    RPC_CFFDUMP_WAITIRQ,
-    RPC_CFFDUMP_WRITEVERIFYFILE,
-    RPC_MEMORY_MAP_EXT_FD_PURE,  /* Linux extension */
-    RPC_MEMORY_UNMAP_EXT_FD_PURE, /* Linux extension */
-    RPC_GET_SHADOWMEM,
-    RPC_PUT_SHADOWMEM,
-    RPC_BLIT,
-    RPC_HANDSHAKE,
-    RPC_SUB_HANDSHAKE,
-    RPC_DISCONNECT,
-    RPC_MEMORY_SET_METAINFO,
-    RPC_GET_SYSTEM_TIME,
-    RPC_GET_DBQ_INFO,
-    RPC_DBQ_CREATE,
-    RPC_PERFCOUNTERS_READ,
-    RPC_NOTIFY_CLEANUP,
-    RPC_COMMAND_RESETSTATUS,
-    RPC_CONTEXT_QUERY_DBCQ,
-    RPC_CONTEXT_REGISTER_DBCQ,
-    RPC_GSLPROFILER_PER_PROC_GPU_BUSY,
-    RPC_GSLPROFILER_PER_PROC_GPU_PMEM,
-    RPC_DEVICE_GETFEATURES,
-    RPC_DEVICE_ACTIVATE,
-    RPC_FUNC_LAST /* insert new func BEFORE this line! */
+	RPC_LIBRARY_OPEN = 0,
+	RPC_LIBRARY_CLOSE,
+	RPC_LIBRARY_VERSION,
+	RPC_LIBRARY_SET_MEMNOTIFY_TYPE,
+	RPC_DEVICE_OPEN,
+	RPC_DEVICE_CLOSE,
+	RPC_DEVICE_GETINFO,
+	RPC_DEVICE_GETINFO_EXT,
+	RPC_DEVICE_SETPOWERSTATE,
+	RPC_DEVICE_WAITIRQ,
+	RPC_DEVICE_GETIRQCNTRBASE,
+	RPC_DEVICE_DUMPSTATE,
+	RPC_COMMAND_ISSUEIB,
+	RPC_COMMAND_INSERTFENCE,
+	RPC_COMMAND_READTIMESTAMP,
+	RPC_COMMAND_ISSUEIB_SYNC,
+	RPC_COMMAND_ISSUEIB_WITH_ALLOC_LIST,
+	RPC_COMMAND_CHECKTIMESTAMP,
+	RPC_COMMAND_WAITTIMESTAMP,
+	RPC_COMMAND_FREEMEMONTIMESTAMP,
+	RPC_COMMAND_RESETSTATUS_INTERNAL,
+	RPC_CONTEXT_CREATE,
+	RPC_CONTEXT_DESTROY,
+	RPC_CONTEXT_BINDGMEMSHADOW,
+	RPC_CONTEXT_SETBINBASEOFFSET,
+	RPC_MEMORY_READ,
+	RPC_MEMORY_WRITE,
+	RPC_MEMORY_COPY,
+	RPC_MEMORY_SET,
+	RPC_MEMORY_QUERYSTATS,
+	RPC_MEMORY_ALLOC_PURE,
+	RPC_MEMORY_PHYS_ALLOC_PURE,
+	RPC_MEMORY_VIRT_ALLOC_PURE,
+	RPC_MEMORY_FREE_PURE,
+	RPC_MEMORY_CACHEOPERATION,
+	RPC_MEMORY_NOTIFY,
+	RPC_MEMORY_BIND,
+	RPC_MEMORY_BIND_SYNC,
+	RPC_MEMORY_MMAP,
+	RPC_MEMORY_MUNMAP,
+	RPC_MEMORY_CREATE_PAGETABLE,
+	RPC_MEMORY_DESTROY_PAGETABLE,
+	RPC_MEMORY_SET_PAGETABLE,
+	RPC_COMMAND_FREEMEMONTIMESTAMP_PURE,
+	RPC_PERFCOUNTER_SELECT,
+	RPC_PERFCOUNTER_DESELECT,
+	RPC_PERFCOUNTER_QUERYSELECTIONS,
+	RPC_PERFCOUNTER_READ,
+	RPC_SYNCOBJ_CREATE,
+	RPC_SYNCOBJ_CREATE_FROM_BIND,
+	RPC_SYNCOBJ_DESTROY,
+	RPC_SYNCOBJ_WAIT,
+	RPC_TIMESTAMP_CMP,
+	RPC_SYNCOBJ_CLONE,
+	RPC_SYNCOBJ_MERGE,
+	RPC_SYNCOBJ_MERGE_MULTIPLE,
+	RPC_SYNCSOURCE_CREATE,
+	RPC_SYNCSOURCE_DESTROY,
+	RPC_SYNCOBJ_CREATE_FROM_SOURCE,
+	RPC_SYNCOBJ_SIGNAL,
+	RPC_SYNCOBJ_WAIT_MULTIPLE,
+	RPC_DEVICE_DEBUG,
+	RPC_CFFDUMP_WAITIRQ,
+	RPC_CFFDUMP_WRITEVERIFYFILE,
+	RPC_MEMORY_MAP_EXT_FD_PURE, /* Linux extension */
+	RPC_MEMORY_UNMAP_EXT_FD_PURE, /* Linux extension */
+	RPC_GET_SHADOWMEM,
+	RPC_PUT_SHADOWMEM,
+	RPC_BLIT,
+	RPC_HANDSHAKE,
+	RPC_SUB_HANDSHAKE,
+	RPC_DISCONNECT,
+	RPC_MEMORY_SET_METAINFO,
+	RPC_GET_SYSTEM_TIME,
+	RPC_GET_DBQ_INFO,
+	RPC_DBQ_CREATE,
+	RPC_PERFCOUNTERS_READ,
+	RPC_NOTIFY_CLEANUP,
+	RPC_COMMAND_RESETSTATUS,
+	RPC_CONTEXT_QUERY_DBCQ,
+	RPC_CONTEXT_REGISTER_DBCQ,
+	RPC_GSLPROFILER_PER_PROC_GPU_BUSY,
+	RPC_GSLPROFILER_PER_PROC_GPU_PMEM,
+	RPC_DEVICE_GETFEATURES,
+	RPC_DEVICE_ACTIVATE,
+	RPC_GVM_INIT,
+	RPC_GVM_DEINIT,
+	RPC_FUNC_LAST /* insert new func BEFORE this line! */
 };
 
 struct hgsl_hyp_priv_t {
-    struct device *dev;
-    struct mutex lock;
-    struct list_head free_channels;
-    struct list_head busy_channels;
-    int conn_id;
-    unsigned char client_name[RPC_CLIENT_NAME_SIZE];
-    int client_pid;
-    struct idr channel_idr;
+	struct device *dev;
+	struct mutex lock;
+	struct list_head free_channels;
+	struct list_head busy_channels;
+	int conn_id;
+	unsigned char client_name[RPC_CLIENT_NAME_SIZE];
+	int client_pid;
+	struct idr channel_idr;
 };
 
 /* backend i.e. server type: depends on server's underlying platform */
 enum gsl_rpc_server_type_t {
-    GSL_RPC_SERVER_TYPE_1 = 1,
-    GSL_RPC_SERVER_TYPE_2,
-    GSL_RPC_SERVER_TYPE_3,
-    GSL_RPC_SERVER_TYPE_LAST
+	GSL_RPC_SERVER_TYPE_1 = 1,
+	GSL_RPC_SERVER_TYPE_2,
+	GSL_RPC_SERVER_TYPE_3,
+	GSL_RPC_SERVER_TYPE_LAST
 };
 
 /* frontend i.e. client type: depends on client's underlying platform */
 enum gsl_rpc_client_type_t {
-    GSL_RPC_CLIENT_TYPE_1 = 1,
-    GSL_RPC_CLIENT_TYPE_2,
-    GSL_RPC_CLIENT_TYPE_3,
-    GSL_RPC_CLIENT_TYPE_LAST
+	GSL_RPC_CLIENT_TYPE_1 = 1,
+	GSL_RPC_CLIENT_TYPE_2,
+	GSL_RPC_CLIENT_TYPE_3,
+	GSL_RPC_CLIENT_TYPE_LAST
 };
 
 /* backend i.e. server mode in regards to the way of handling new client */
 enum gsl_rpc_server_mode_t {
-    GSL_RPC_SERVER_MODE_1 = 1,
-    GSL_RPC_SERVER_MODE_2,
-    GSL_RPC_SERVER_MODE_3,
-    GSL_RPC_SERVER_MODE_LAST
+	GSL_RPC_SERVER_MODE_1 = 1,
+	GSL_RPC_SERVER_MODE_2,
+	GSL_RPC_SERVER_MODE_3,
+	GSL_RPC_SERVER_MODE_LAST
+};
+
+/* frontend i.e. msg type send to be */
+enum hgsl_ipcq_msg_id_t {
+	GSL_IPCQ_SNAPSHOT_DUMP = 1,
+	GSL_IPCQ_INVALID
 };
 
 #pragma pack(push, 4)
 
 /* For RPC_HANDSHAKE version < 2 */
 struct handshake_params_t {
-    uint32_t size;
-    uint32_t client_type;
-    uint32_t client_version;
-    uint32_t pid;
-    char name[RPC_CLIENT_NAME_SIZE];
+	uint32_t size;
+	uint32_t client_type;
+	uint32_t client_version;
+	uint32_t pid;
+	char name[RPC_CLIENT_NAME_SIZE];
 };
 
 struct handshake_params_v2_t {
-    uint32_t size;
-    uint32_t client_type;
-    uint32_t client_version;
-    uint32_t pid;
-    char name[RPC_CLIENT_NAME_SIZE];
-    /* user id in current namespace, if set to (uid_t)(-1),
-     * backend will ignore it and use default settings
-     */
-    uint32_t uid;
+	uint32_t size;
+	uint32_t client_type;
+	uint32_t client_version;
+	uint32_t pid;
+	char name[RPC_CLIENT_NAME_SIZE];
+	/* user id in current namespace, if set to (uid_t)(-1),
+	 * backend will ignore it and use default settings
+	 */
+	uint32_t uid;
 };
 
 struct sub_handshake_params_t {
-    uint32_t size;
-    uint32_t pid;
-    uint32_t memdesc_size;
+	uint32_t size;
+	uint32_t pid;
+	uint32_t memdesc_size;
 };
 
 struct library_open_params_t {
-    uint32_t            size;
-    uint32_t            flags;
+	uint32_t size;
+	uint32_t flags;
+};
+
+struct library_close_params_t {
+	uint32_t size;
+	uint32_t flags;
+};
+
+struct device_open_params_t {
+	uint32_t            size;
+	enum gsl_deviceid_t device_id;
+	uint32_t            flags;
+};
+
+struct device_close_params_t {
+	uint32_t            size;
+	enum gsl_deviceid_t device_id;
 };
 
 struct context_create_params_t {
-    uint32_t                size;
-    uint32_t                devhandle;
-    enum gsl_context_type_t type;
-    uint32_t                flags;
+	uint32_t                size;
+	uint32_t                devhandle;
+	enum gsl_context_type_t type;
+	uint32_t                flags;
 };
 
 struct context_destroy_params_t {
-    uint32_t                size;
-    uint32_t                devhandle;
-    uint32_t                ctxthandle;
+	uint32_t                size;
+	uint32_t                devhandle;
+	uint32_t                ctxthandle;
 };
 
 struct get_shadowmem_params_v1_t {
-    uint32_t            size;
-    enum gsl_deviceid_t device_id;
-    uint32_t            ctxthandle;
+	uint32_t            size;
+	enum gsl_deviceid_t device_id;
+	uint32_t            ctxthandle;
 };
 
 struct put_shadowmem_params_t {
-    uint32_t            size;
-    uint32_t            export_id;
+	uint32_t            size;
+	uint32_t            export_id;
 };
 
 struct shadowprop_t {
-    uint32_t        size;
-    uint64_t        sizebytes;
-    uint32_t        flags;
+	uint32_t        size;
+	uint64_t        sizebytes;
+	uint32_t        flags;
 };
 
 struct memory_alloc_params_t {
-    uint32_t                size;
-    uint32_t                sizebytes;
-    uint32_t                flags;
+	uint32_t                size;
+	uint32_t                sizebytes;
+	uint32_t                flags;
 };
 
 struct memory_free_params_t {
-    uint32_t                size;
-    uint32_t                flags;
+	uint32_t                size;
+	uint32_t                flags;
 };
 
 struct memory_map_ext_fd_params_t {
-    uint32_t                size;
-    int                     fd;
-    uint64_t                hostptr;
-    uint64_t                len;
-    uint64_t                offset;
-    uint32_t                memtype;
-    uint32_t                flags;
+	uint32_t                size;
+	int                     fd;
+	uint64_t                hostptr;
+	uint64_t                len;
+	uint64_t                offset;
+	uint32_t                memtype;
+	uint32_t                flags;
 };
 
 struct memory_unmap_ext_fd_params {
-    uint32_t                size;
-    uint64_t                gpuaddr;
-    uint64_t                hostptr;
-    uint64_t                len;
-    uint32_t                memtype;
+	uint32_t                size;
+	uint64_t                gpuaddr;
+	uint64_t                hostptr;
+	uint64_t                len;
+	uint32_t                memtype;
 };
 
 struct hyp_ibdesc_t {
-    uint32_t size;
-    uint64_t gpuaddr;
-    uint64_t server_priv_memdesc;
-    uint32_t sizedwords;
+	uint32_t size;
+	uint64_t gpuaddr;
+	uint64_t server_priv_memdesc;
+	uint32_t sizedwords;
 };
 
 struct command_issueib_params_t {
-    uint32_t            size;
-    uint32_t            devhandle;
-    uint32_t            ctxthandle;
-    uint32_t            numibs;
-    uint32_t            timestamp;
-    uint32_t            flags;
+	uint32_t            size;
+	uint32_t            devhandle;
+	uint32_t            ctxthandle;
+	uint32_t            numibs;
+	uint32_t            timestamp;
+	uint32_t            flags;
 };
 
 struct command_issueib_with_alloc_list_params {
-    uint32_t            size;
-    uint32_t            devhandle;
-    uint32_t            ctxthandle;
-    uint32_t            numibs;
-    uint32_t            numallocations;
-    uint32_t            timestamp;
-    uint32_t            flags;
-    uint64_t            syncobj;
+	uint32_t            size;
+	uint32_t            devhandle;
+	uint32_t            ctxthandle;
+	uint32_t            numibs;
+	uint32_t            numallocations;
+	uint32_t            timestamp;
+	uint32_t            flags;
+	uint64_t            syncobj;
 };
 
 struct memory_set_metainfo_params_t {
-    uint64_t            memdesc_priv;
-    uint32_t            flags;
-    char                metainfo[128];
-    uint64_t            metainfo_len;
+	uint64_t            memdesc_priv;
+	uint32_t            flags;
+	char                metainfo[128];
+	uint64_t            metainfo_len;
 };
 
 struct command_waittimestamp_params_t {
-    uint32_t                size;
-    uint32_t                devhandle;
-    uint32_t                ctxthandle;
-    uint32_t                timestamp;
-    uint32_t                timeout;
+	uint32_t                size;
+	uint32_t                devhandle;
+	uint32_t                ctxthandle;
+	uint32_t                timestamp;
+	uint32_t                timeout;
 };
 
 struct command_readtimestamp_params_t {
-    uint32_t                size;
-    uint32_t                devhandle;
-    uint32_t                ctxthandle;
-    enum gsl_timestamp_type_t    type;
+	uint32_t                size;
+	uint32_t                devhandle;
+	uint32_t                ctxthandle;
+	enum gsl_timestamp_type_t    type;
 };
 
 struct command_checktimestamp_params_t {
-    uint32_t                size;
-    uint32_t                devhandle;
-    uint32_t                ctxthandle;
-    uint32_t                timestamp;
-    enum gsl_timestamp_type_t    type;
+	uint32_t                size;
+	uint32_t                devhandle;
+	uint32_t                ctxthandle;
+	uint32_t                timestamp;
+	enum gsl_timestamp_type_t    type;
 };
 
 struct get_system_time_params_t {
-    uint32_t                size;
-    enum gsl_systemtime_usage_t  usage;
+	uint32_t                size;
+	enum gsl_systemtime_usage_t  usage;
 };
 
 struct get_dbq_info_params_t {
-    uint32_t        size;
-    uint64_t        gpuaddr;
-    uint64_t        priv_memdesc;
-    uint32_t        sizedwords;
-    int             q_idx;
+	uint32_t        size;
+	uint64_t        gpuaddr;
+	uint64_t        priv_memdesc;
+	uint32_t        sizedwords;
+	int             q_idx;
 };
 
 struct dbq_create_params_t {
-    uint32_t            size;
-    uint32_t            ctxthandle;
+	uint32_t            size;
+	uint32_t            ctxthandle;
 };
 
 struct syncobj_wait_multiple_params_t {
-    uint32_t            size;
-    uint64_t            num_syncobjs;
-    uint32_t            timeout_ms;
+	uint32_t            size;
+	uint64_t            num_syncobjs;
+	uint32_t            timeout_ms;
 };
 
 struct perfcounter_select_params_t {
-    uint32_t                size;
-    uint32_t                devhandle;
-    uint32_t                ctxthandle;
-    int                     num_counters;
+	uint32_t                size;
+	uint32_t                devhandle;
+	uint32_t                ctxthandle;
+	int                     num_counters;
 };
 
 struct perfcounter_deselect_params_t {
-    uint32_t                size;
-    uint32_t                devhandle;
-    uint32_t                ctxthandle;
-    uint32_t                timestamp;
-    int                     num_counters;
+	uint32_t                size;
+	uint32_t                devhandle;
+	uint32_t                ctxthandle;
+	uint32_t                timestamp;
+	int                     num_counters;
 };
 
 struct perfcounter_query_selections_params_t {
-    uint32_t                    size;
-    uint32_t                    devhandle;
-    uint32_t                    ctxthandle;
-    enum gsl_perfcountergroupid_t    group;
-    int                         num_counters;
+	uint32_t                    size;
+	uint32_t                    devhandle;
+	uint32_t                    ctxthandle;
+	enum gsl_perfcountergroupid_t    group;
+	int                         num_counters;
 };
 
 struct perfcounter_read_params_t {
-    uint32_t                    size;
-    uint32_t                    devhandle;
-    enum gsl_perfcountergroupid_t    group;
-    uint32_t                    counter;
+	uint32_t                    size;
+	uint32_t                    devhandle;
+	enum gsl_perfcountergroupid_t    group;
+	uint32_t                    counter;
 };
 
 struct notify_cleanup_params_t {
-    uint32_t            size;
-    uint32_t            timeout;
+	uint32_t            size;
+	uint32_t            timeout;
 };
 
 struct query_dbcq_params_t {
-    uint32_t                size;
-    uint32_t                devhandle;
-    uint32_t                ctxthandle;
-    uint32_t                length;
+	uint32_t                size;
+	uint32_t                devhandle;
+	uint32_t                ctxthandle;
+	uint32_t                length;
 };
 
 struct register_dbcq_params_t {
-    uint32_t                size;
-    uint32_t                devhandle;
-    uint32_t                ctxthandle;
-    uint32_t                len;
-    uint32_t                queue_body_offset;
-    uint32_t                export_id;
+	uint32_t                size;
+	uint32_t                devhandle;
+	uint32_t                ctxthandle;
+	uint32_t                len;
+	uint32_t                queue_body_offset;
+	uint32_t                export_id;
+};
+
+struct context_create_params_v2_t {
+	uint32_t                            size;
+	struct context_create_params_t      ctxt_create_param;
+	struct memory_map_ext_fd_params_t   shadow_map_param;
+	uint64_t                            ttbr0;
+	uint64_t                            ctxt_record_mem_gpu_addr;
 };
 
 struct context_create_params_v1_t {
-    uint32_t                          size;
-    struct context_create_params_t    ctxt_create_param;
-    struct memory_map_ext_fd_params_t shadow_map_param;
-    uint32_t                          dbq_off;
+	uint32_t                            size;
+	struct context_create_params_t      ctxt_create_param;
+	struct memory_map_ext_fd_params_t   shadow_map_param;
+	uint32_t                            dbq_off;
+};
+
+struct gslprofiler_per_proc_gpu_busy_params {
+	uint32_t                size;
+	uint32_t                sampling_time;
+};
+
+struct gslprofiler_per_proc_gpu_pmem_params {
+	uint32_t                size;
+};
+
+struct device_activate_params {
+	uint32_t                size;
+	uint32_t                devhandle;
+};
+struct hgsl_init_param_t {
+	/* All size and offset values are in dword */
+	uint32_t size;
+	/* device handle identifier */
+	uint32_t devhandle;
+	/* buffer shared between rgs and hgsl for two queues. */
+	uint32_t pkmd_export_id;
+	/* overall size of the queue buffer */
+	uint32_t pkmd_dwsize;
+	/* the start address of the queue header */
+	uint32_t PKMD2HGSL_queue_offset;
+	/* list supported hgsl features */
+	uint32_t feature_flags;
+	/* ring buffer offset from queue base address */
+	uint32_t PKMD2HGSL_rb_offset;
+
+	/* buffer shared between gmu and hgsl - only this buffer will be mapped to GMU */
+	uint32_t gmu_export_id;
+	/* size of above buffer */
+	uint32_t gmu_dwsize;
+	/* the start address of the queue header */
+	uint32_t GMU2HGSL_queue_offset;
+	/* size of the struct HfiQueueHeader + size of the queue ring buffer */
+	uint32_t GMU2HGSL_queue_size;
+	/* ring buffer offset from queue base address */
+	uint32_t GMU2HGSL_rb_offset;
+	/* the start address of the queue header */
+	uint32_t HGSL2GMU_queue_offset;
+	/* size of the struct HfiQueueHeader + size of the queue ring buffer */
+	uint32_t HGSL2GMU_queue_size;
+	/* ring buffer offset from queue base address */
+	uint32_t HGSL2GMU_rb_offset;
+};
+
+struct hgsl_deinit_param_t {
+	uint32_t size;
+	uint32_t devhandle;
+};
+
+struct hgsl_gvm_settings {
+	/* fv bit: 1 */
+	uint32_t enabled_feature_mask;
+	/* sid for this gvm */
+	uint32_t sid;
+	/* stage 1 context bank index for this gvm */
+	uint32_t cb;
+	/* irq index for the GMU2GOS/GOS2GMU irq */
+	uint32_t irq_index;
+	/* the irq bit used to notice new hfi cmd in PKMD2HGSL queue */
+	uint32_t irq_bit_pkmd_hfi;
+	/*  context record buffer size in kb */
+	uint32_t ctxt_rec_buf_size_KB;
+	/* add more parameters needed for hw fence */
+	/* gmu virtual addr for the buffer used for hfi cmd/msg queue between hgsl and gmu */
+	uint32_t gmu_addr;
+	/* the irq bit used to notice new hfi cmd in above gmu2hgsl hfi queue */
+	uint32_t irq_bit_gmu_hfi;
+	/* device handle identifier */
+	uint32_t device_id;
+	/* virtual address start */
+	uint32_t va_start;
+	/* virtual address end */
+	uint32_t va_end;
+	/* sync irq shift value */
+	uint32_t sync_irq_shift;
+};
+
+struct HfiQueueHeader {
+	/* The Queue status.0x01 : Queue is active.0x00 : Queue is inactive. */
+	uint32_t status;
+	/* The Queue start address in GMU VA space. 4 byte-aligned */
+	uint32_t startAddr;
+	/* Types, see macro mask above to access each type */
+	/* including fieds: HFI_MASK_QHDR_RX_TYPE, HFI_MASK_QHDR_TX_TYPE, HFI_MASK_QHDR_PRI_TYPE */
+	/* and HFI_MASK_QHDR_Q_ID_TYPE */
+	uint32_t type;
+	/* Size of the Queue. */
+	uint32_t dwSize;
+	/* Size of the Queue packet entries, in dwords. */
+	/* A value of 0 indicates variable packet sizes. */
+	uint32_t pktSize;
+	/* number of packets that were dropped by the sender */
+	uint32_t pktDropCnt;
+	/* not used, make it padding until there's something we want */
+	uint32_t pad1;
+	uint32_t pad2;
+	uint32_t pad3;
+	uint32_t pad4;
+	/* Read index in dwords, which starts with a value of 0
+	 *and wraps around after QHDR_Q_SIZE - 1
+	 */
+	uint32_t readIdx;
+	/* Write index in dwords, which starts with a value of 0 */
+	/* and wraps around after QHDR_Q_SIZE - 1  */
+	uint32_t writeIdx;
+};
+
+struct HfiMsgHeader_t {
+	uint32_t msg_id             : 8;  /* see hgsl_ipcq_msg_id_t */
+	uint32_t msg_size_dword     : 8;  /* unit in dword, maximum 255 */
+	uint32_t msg_type           : 4;
+	uint32_t msg_packet_seq_no  : 12;
+};
+
+struct hgsl_ipcq_data_t {
+	// size all in dw
+	struct HfiQueueHeader   header;
+	int                     is_allocated;
+	uintptr_t               baseaddr;
+};
+
+struct hgsl_ipcq_gvm_state_dump_msg {
+	struct HfiMsgHeader_t header;
+	uint32_t              ib_num;
+	uint64_t              gpuaddr[HGSL_PER_CTXT_MAX_IB_NUM];
+	uint32_t              size_dw[HGSL_PER_CTXT_MAX_IB_NUM];
+	uint32_t              ctxt_id;
+	uint32_t              ts;  // Per-context user space gsl timestamp of the fault command
 };
 
 #pragma pack(pop)
 
 struct hgsl_hab_channel_t {
-    struct list_head node;
-    int socket;
-    int id;
-    bool wait_retry;
-    bool busy;
-    struct hgsl_hyp_priv_t  *priv;
-    struct gsl_hab_payload  send_buf;
-    struct gsl_hab_payload  recv_buf;
+	struct list_head node;
+	int socket;
+	int id;
+	bool wait_retry;
+	bool busy;
+	struct hgsl_hyp_priv_t *priv;
+	struct gsl_hab_payload send_buf;
+	struct gsl_hab_payload recv_buf;
 };
 
 struct hgsl_dbq_info {
-    uint32_t export_id;
-    uint32_t size;
-    uint32_t head_dwords;
-    int32_t  head_off_dwords;
-    uint32_t queue_dwords;
-    int32_t  queue_off_dwords;
-    uint32_t db_signal;
-    struct dma_buf *dma_buf;
-    uint64_t gmuaddr;
-    uint32_t ibdesc_max_size;
-    struct hgsl_hab_channel_t *hab_channel;
+	uint32_t export_id;
+	uint32_t size;
+	uint32_t head_dwords;
+	int32_t  head_off_dwords;
+	uint32_t queue_dwords;
+	int32_t  queue_off_dwords;
+	uint32_t db_signal;
+	struct dma_buf *dma_buf;
+	uint64_t gmuaddr;
+	uint32_t ibdesc_max_size;
+	struct hgsl_hab_channel_t *hab_channel;
 };
 
 int hgsl_hyp_init(struct hgsl_hyp_priv_t *priv, struct device *dev,
-    int client_pid, const char * const client_name);
+	int client_pid, const char * const client_name);
 
 void hgsl_hyp_close(struct hgsl_hyp_priv_t *priv);
 
 int hgsl_hyp_channel_pool_get(
-    struct hgsl_hyp_priv_t *priv, int id, struct hgsl_hab_channel_t **channel);
+	struct hgsl_hyp_priv_t *priv, int id, struct hgsl_hab_channel_t **channel);
 
 void hgsl_hyp_channel_pool_put(struct hgsl_hab_channel_t *hab_channel);
 
 int hgsl_hyp_generic_transaction(struct hgsl_hyp_priv_t *priv,
-    struct hgsl_ioctl_hyp_generic_transaction_params *params,
-    void **pSend, void **pReply, void *pRval);
+	struct hgsl_ioctl_hyp_generic_transaction_params *params,
+	void **pSend, void **pReply, void *pRval);
 
-int hgsl_hyp_gsl_lib_open(struct hgsl_hyp_priv_t *priv,
-    uint32_t flags, int32_t *rval);
+int hgsl_hyp_lib_open(struct hgsl_hyp_priv_t *priv,
+		uint32_t flags, int32_t *rval);
+
+int hgsl_hyp_lib_close(struct hgsl_hyp_priv_t *priv,
+		uint32_t flags, int32_t *rval);
 
 int hgsl_hyp_ctxt_create(struct hgsl_hab_channel_t *hab_channel,
-    struct hgsl_ioctl_ctxt_create_params *hgsl_params);
+		struct hgsl_ioctl_ctxt_create_params *hgsl_params);
+
+int hgsl_hyp_device_open(struct hgsl_hyp_priv_t *priv,
+		uint32_t flags, enum gsl_deviceid_t device_id, int32_t *rval);
+
+int hgsl_hyp_device_close(struct hgsl_hyp_priv_t *priv,
+		int32_t *rval, enum gsl_deviceid_t device_id);
+
+int hgsl_hyp_activate_device_handle(struct hgsl_hyp_priv_t *priv,
+		struct hgsl_ioctl_activate_device_params *hgsl_param);
 
 int hgsl_hyp_dbq_create(struct hgsl_hab_channel_t *hab_channel,
-    uint32_t ctxthandle, uint32_t *dbq_info);
+	uint32_t ctxthandle, uint32_t *dbq_info);
 
 int hgsl_hyp_ctxt_destroy(struct hgsl_hab_channel_t *hab_channel,
-    uint32_t devhandle, uint32_t context_id, uint32_t *rval, uint32_t dbcq_export_id);
+	uint32_t devhandle, uint32_t context_id, uint32_t *rval, uint32_t dbcq_export_id);
 
 int hgsl_hyp_get_shadowts_mem(struct hgsl_hab_channel_t *hab_channel,
-    uint32_t context_id, uint32_t *shadow_ts_flags,
-    struct hgsl_mem_node *mem_node);
+	uint32_t context_id, uint32_t *shadow_ts_flags,
+	struct hgsl_mem_node *mem_node);
 
 int hgsl_hyp_put_shadowts_mem(struct hgsl_hab_channel_t *hab_channel,
-    struct hgsl_mem_node *mem_node);
+	struct hgsl_mem_node *mem_node);
 
 int hgsl_hyp_mem_map_smmu(struct hgsl_hab_channel_t *hab_channel,
-    uint64_t size, uint64_t offset,
-    struct hgsl_mem_node *mem_node);
+	uint64_t size, uint64_t offset,
+	struct hgsl_mem_node *mem_node);
 
 int hgsl_hyp_mem_unmap_smmu(struct hgsl_hab_channel_t *hab_channel,
-    struct hgsl_mem_node *mem_node);
+	struct hgsl_mem_node *mem_node);
 
 int hgsl_hyp_set_metainfo(struct hgsl_hyp_priv_t *priv,
-    struct hgsl_ioctl_set_metainfo_params *hgsl_param,
-    const char *metainfo);
+	struct hgsl_ioctl_set_metainfo_params *hgsl_param,
+	const char *metainfo);
 
 int hgsl_hyp_issueib(struct hgsl_hyp_priv_t *priv,
-    struct hgsl_ioctl_issueib_params *hgsl_param,
-    struct hgsl_ibdesc *ib);
+	struct hgsl_ioctl_issueib_params *hgsl_param,
+	struct hgsl_ibdesc *ib);
 
 int hgsl_hyp_issueib_with_alloc_list(struct hgsl_hyp_priv_t *priv,
-    struct hgsl_ioctl_issueib_with_alloc_list_params *hgsl_param,
-    struct gsl_command_buffer_object_t *ib,
-    struct gsl_memory_object_t *allocations,
-    struct gsl_memdesc_t *be_descs,
-    uint64_t *be_offsets);
+	struct hgsl_ioctl_issueib_with_alloc_list_params *hgsl_param,
+	struct gsl_command_buffer_object_t *ib,
+	struct gsl_memory_object_t *allocations,
+	struct gsl_memdesc_t *be_descs,
+	uint64_t *be_offsets);
 
 int hgsl_hyp_wait_timestamp(struct hgsl_hyp_priv_t *priv,
-    struct hgsl_wait_ts_info *hgsl_param);
+	struct hgsl_wait_ts_info *hgsl_param);
 
 int hgsl_hyp_check_timestamp(struct hgsl_hyp_priv_t *priv,
-    struct hgsl_ioctl_check_ts_params *hgsl_param);
+	struct hgsl_ioctl_check_ts_params *hgsl_param);
 
 int hgsl_hyp_read_timestamp(struct hgsl_hyp_priv_t *priv,
-    struct hgsl_ioctl_read_ts_params *hgsl_param);
+	struct hgsl_ioctl_read_ts_params *hgsl_param);
 
 int hgsl_hyp_get_system_time(struct hgsl_hyp_priv_t *priv,
-    uint64_t *hgsl_param);
+	uint64_t *hgsl_param);
 
 int hgsl_hyp_syncobj_wait_multiple(struct hgsl_hyp_priv_t *priv,
-    uint64_t *rpc_syncobj, uint64_t num_syncobjs,
-    uint32_t timeout_ms, int32_t *status, int32_t *result);
+	uint64_t *rpc_syncobj, uint64_t num_syncobjs,
+	uint32_t timeout_ms, int32_t *status, int32_t *result);
 
 int hgsl_hyp_perfcounter_select(struct hgsl_hyp_priv_t *priv,
-    struct hgsl_ioctl_perfcounter_select_params *hgsl_param,
-    uint32_t *groups, uint32_t *counter_ids,
-    uint32_t *counter_val_regs, uint32_t *counter_val_hi_regs);
+	struct hgsl_ioctl_perfcounter_select_params *hgsl_param,
+	uint32_t *groups, uint32_t *counter_ids,
+	uint32_t *counter_val_regs, uint32_t *counter_val_hi_regs);
 
 int hgsl_hyp_perfcounter_deselect(struct hgsl_hyp_priv_t *priv,
-    struct hgsl_ioctl_perfcounter_deselect_params *hgsl_param,
-    uint32_t *groups, uint32_t *counter_ids);
+	struct hgsl_ioctl_perfcounter_deselect_params *hgsl_param,
+	uint32_t *groups, uint32_t *counter_ids);
 
 int hgsl_hyp_perfcounter_query_selections(struct hgsl_hyp_priv_t *priv,
-    struct hgsl_ioctl_perfcounter_query_selections_params *hgsl_param,
-    int32_t *selections);
+	struct hgsl_ioctl_perfcounter_query_selections_params *hgsl_param,
+	int32_t *selections);
 
 int hgsl_hyp_perfcounter_read(struct hgsl_hyp_priv_t *priv,
-    struct hgsl_ioctl_perfcounter_read_params *hgsl_param);
+	struct hgsl_ioctl_perfcounter_read_params *hgsl_param);
 
 int hgsl_hyp_get_dbq_info(struct hgsl_hyp_priv_t *priv, uint32_t dbq_idx,
-    struct hgsl_dbq_info *dbq_info);
+	struct hgsl_dbq_info *dbq_info);
 
 int hgsl_hyp_notify_cleanup(struct hgsl_hab_channel_t *hab_channel, uint32_t timeout);
 
 int hgsl_hyp_query_dbcq(struct hgsl_hab_channel_t *hab_channel, uint32_t devhandle,
-    uint32_t ctxthandle, uint32_t length, uint32_t *db_signal, uint32_t *queue_gmuaddr,
-    uint32_t *irq_bit_idx);
+	uint32_t ctxthandle, uint32_t length, uint32_t *db_signal, uint32_t *queue_gmuaddr,
+	uint32_t *irq_bit_idx);
 
 int hgsl_hyp_context_register_dbcq(struct hgsl_hab_channel_t *hab_channel,
-    uint32_t devhandle, uint32_t ctxthandle, struct dma_buf *dma_buf, uint32_t size,
-    uint32_t queue_body_offset, uint32_t *export_id);
+	uint32_t devhandle, uint32_t ctxthandle, struct dma_buf *dma_buf, uint32_t size,
+	uint32_t queue_body_offset, uint32_t *export_id);
+
+int hgsl_hyp_export_ipc_queue(struct qcom_hgsl *hgsl, int device_id);
+
+void hgsl_hyp_deinit_ipcq(struct qcom_hgsl *hgsl, int dev_idx);
 
 int hgsl_hyp_ctxt_create_v1(struct device *dev,
-            struct hgsl_priv *priv,
-            struct hgsl_hab_channel_t *hab_channel,
-            struct hgsl_context *ctxt,
-            struct hgsl_ioctl_ctxt_create_params *hgsl_params,
-            int dbq_off, uint32_t *dbq_info);
+	struct hgsl_priv *priv,
+	struct hgsl_hab_channel_t *hab_channel,
+	struct hgsl_context *ctxt,
+	struct hgsl_ioctl_ctxt_create_params *hgsl_params,
+	int dbq_off, uint32_t *dbq_info);
+
+int hgsl_hyp_ctxt_create_v2(struct device *dev,
+	struct hgsl_priv *priv,
+	struct hgsl_hab_channel_t *hab_channel,
+	struct hgsl_context *ctxt,
+	struct hgsl_ioctl_ctxt_create_params *hgsl_params);
+
+int hgsl_hyp_gslprofiler_per_proc_gpu_busy(struct hgsl_hyp_priv_t *priv,
+		struct hgsl_ioctl_gslprofiler_per_proc_gpu_busy_params *hgsl_param,
+		struct gsl_profiler_get_per_proc_gpu_busy_percentage_t *busy);
+
+int hgsl_hyp_gslprofiler_per_proc_gpu_pmem(struct hgsl_hyp_priv_t *priv,
+		struct hgsl_ioctl_gslprofiler_per_proc_gpu_pmem_params *hgsl_param,
+		struct gsl_profiler_get_per_proc_gpu_pmem_usage_t *pmem);
 #endif
