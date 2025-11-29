@@ -277,6 +277,7 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 	if (ctxt->dispatch) {
 		hgsl_dispatch_ctxt_schedule(ctxt);
 		kthread_flush_worker(ctxt->dispatch->worker);
+		hgsl_reclaim_drawobjs(ctxt);
 	}
 	hgsl_put_context(ctxt);
 }
