@@ -590,6 +590,12 @@ static int hgsl_iommu_setup_context(struct hgsl_mmu *mmu,
 
 	LOGI("get domain success for name %s", name);
 
+	if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64))) {
+		dev_err(&pdev->dev, "Failed to set 64-bit DMA mask\n");
+		ret = -EIO;
+		goto out;
+	}
+
 #endif
 
 	iommu_set_fault_handler(context->domain, handler, mmu);
@@ -674,7 +680,7 @@ int hgsl_iommu_map_using_single_pt(struct hgsl_mem_node *mem_node,
 		ret = dma_map_sgtable(mem_node->mem_node_iommu_info.attach_iommu->dev,
 				sgt, DMA_BIDIRECTIONAL, attr);
 		if (ret) {
-			LOGE("Error in dma_map_sgtable ret=%d", ret);
+			LOGE("Error in dma_map_sgtable for buf size 0x%x ret=%d", mem_node->memdesc.size, ret);
 			goto out_put_sgt;
 		}
 #if IS_ENABLED(CONFIG_DEBUG_FV)

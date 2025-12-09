@@ -13,9 +13,11 @@
 /*
  * Bit 0-5 are used for doorbell interrupt for each RB
  * Bit 8 is used for retire TS interrupt to GVM.
+ * Bit 9 is used for ipcq communication interrupt with rgs
  */
 #define TCSR_KMD_TRIGGER_IRQ_ID_0		0
 #define TCSR_GMU_TRIGGER_IRQ_ID_0		8
+#define TCSR_RGS_TRIGGER_IRQ_ID_0		9
 
 /* Define Source and Destination IRQ for KMD */
 #define TCSR_SRC_IRQ_ID_0		TCSR_KMD_TRIGGER_IRQ_ID_0
@@ -23,6 +25,8 @@
 #define TCSR_DEST_IRQ_ID_0		TCSR_GMU_TRIGGER_IRQ_ID_0
 
 #define TCSR_DEST_IRQ_MASK_0	(1 << TCSR_DEST_IRQ_ID_0)
+
+#define TCSR_DEST_IRQ_MASK_1	(1 << TCSR_RGS_TRIGGER_IRQ_ID_0)
 
 enum hgsl_tcsr_role {
 	HGSL_TCSR_ROLE_SENDER = 0,

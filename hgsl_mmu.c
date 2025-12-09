@@ -135,7 +135,7 @@ hgsl_mmu_unmap(struct qcom_hgsl *hgsl_dev, struct hgsl_pagetable *pagetable,
 	}
 
 	if (memnode->memdesc.gpuaddr == 0) {
-		LOGE("Invalid gpu address");
+		LOGE("Invalid gpu address = 0");
 		ret = -EINVAL;
 		goto out;
 	}
