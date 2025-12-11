@@ -1239,7 +1239,7 @@ static int hgsl_allocate_per_device_ipc_queues(struct qcom_hgsl *hgsl, uint32_t 
 
 	ret = hgsl_hyp_export_ipc_queue(hgsl, dev_idx);
 	if (ret) {
-		LOGE("Failed to export ipcq %d\n", ret);
+		LOGI("Failed to export ipcq %d\n", ret);
 		goto err;
 	}
 
@@ -1287,7 +1287,7 @@ static int hgsl_allocate_ipc_queues(struct qcom_hgsl *hgsl, uint32_t dev_idx)
 
 	ret = hgsl_allocate_per_device_ipc_queues(hgsl, dev_idx);
 	if (ret) {
-		LOGE("failed to alloc ipc queues for dev %d, ret %d", dev_idx, ret);
+		LOGI("failed to alloc ipc queues for dev %d, ret %d", dev_idx, ret);
 	}
 
 out:
@@ -5071,7 +5071,7 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 
 		ret = hgsl_allocate_ipc_queues(hgsl_dev, i);
 		if (ret) {
-			LOGE("error in hgsl_allocate_ipc_queues %d", ret);
+			LOGI("error in hgsl_allocate_ipc_queues %d", ret);
 			hgsl_hyp_deinit_ipcq(hgsl_dev, i);
 			continue;
 		}
