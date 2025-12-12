@@ -28,6 +28,8 @@ struct hgsl_dispatch_context {
 	struct kthread_work work;
 };
 
+void hgsl_reclaim_drawobjs(struct hgsl_context *ctxt);
+
 int hgsl_dispatch_init(struct qcom_hgsl *hgsl);
 void hgsl_dispatch_deinit(struct qcom_hgsl *hgsl);
 

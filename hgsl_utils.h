@@ -23,7 +23,9 @@ enum {
 };
 
 /* Number of the GPU device */
-#define HGSL_DEVICE_NUM  (2)
+#define HGSL_DEVICE_NUM   (2)
+#define HGSL_DEVICE_IDX_0 (0)
+#define HGSL_DEVICE_IDX_1 (1)
 
 #define LOGE(...) hgsl_log(LOG_LEVEL_ERROR, __func__, __LINE__, ##__VA_ARGS__)
 #define LOGW(...) hgsl_log(LOG_LEVEL_WARN, __func__, __LINE__, ##__VA_ARGS__)

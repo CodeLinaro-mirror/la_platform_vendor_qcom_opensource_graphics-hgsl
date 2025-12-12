@@ -151,6 +151,9 @@ struct gsl_memdesc_t {
 		uintptr_t       priv;
 		uint64_t        priv64;
 	};
+
+	void*               placed_addr;
+	int                 reserve_placed;
 };
 
 struct gsl_command_buffer_object_t {
