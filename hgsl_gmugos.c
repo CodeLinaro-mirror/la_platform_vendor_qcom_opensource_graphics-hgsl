@@ -422,14 +422,11 @@ int hgsl_init_gmugos(struct platform_device *pdev, uint32_t devhandle,
 
 	if (mask_bits & RGSGOS_IRQ_MASK) {
 		if (!gmugos_irq->irq_workqueue) {
-			char irq_wq_name[HGSL_GMUGOS_WQ_NAME_LEN];
-
-			snprintf(irq_wq_name, sizeof(irq_wq_name), "%s_workqueue",
-				name);
-			gmugos_irq->irq_workqueue = alloc_workqueue(irq_wq_name, WQ_UNBOUND, 1);
+			gmugos_irq->irq_workqueue =
+				alloc_ordered_workqueue("%s_workqueue", WQ_MEM_RECLAIM, name);
 			if (IS_ERR_OR_NULL(gmugos_irq->irq_workqueue)) {
-				LOGE("FAILED to allocated %s wq", irq_wq_name);
-				ret = ENOMEM;
+				LOGE("FAILED to allocated %s_workqueue", name);
+				ret = -ENOMEM;
 				goto out;
 			} else {
 				INIT_WORK(&gmugos_irq->irq_work, hgsl_gmugos_handle_ipcq_msg);
