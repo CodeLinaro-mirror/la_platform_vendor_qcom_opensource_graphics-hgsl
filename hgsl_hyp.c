@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include "hgsl.h"
 #include "hgsl_hyp.h"
 #include "hgsl_utils.h"
+#include "hgsl_snapshot.h"
 #include <linux/delay.h>
 #include <linux/dma-buf.h>
 #include <linux/habmm.h>
@@ -118,6 +119,8 @@ static const char * const gsl_rpc_func_names[] = {
 	"RPC_DEVICE_ACTIVATE",
 	"RPC_GVM_INIT",
 	"RPC_GVM_DEINIT",
+	"RPC_NOTIFY_PM_STATE",
+	"RPC_GVM_STATE_DUMP",
 	"RPC_FUNC_LAST" // insert new func BEFORE this line!
 };
 
@@ -3492,7 +3495,6 @@ out:
 	return ret;
 }
 
-
 int hgsl_hyp_gslprofiler_per_proc_gpu_busy(struct hgsl_hyp_priv_t *priv,
 	struct hgsl_ioctl_gslprofiler_per_proc_gpu_busy_params *hgsl_param,
 	struct gsl_profiler_get_per_proc_gpu_busy_percentage_t *busy)
@@ -3662,4 +3664,95 @@ out:
 	hgsl_hyp_channel_pool_put(hab_channel);
 	RPC_TRACE_DONE();
 	return ret;
+}
+
+/* set buf_sizebytes to 0 in case a failure in parsing ib */
+void hgsl_hyp_export_memory(struct hgsl_hyp_priv_t *hyp_priv,
+	uint32_t devhandle, struct hgsl_mem_node *mem_node, uint32_t used_size,
+	uint32_t buf_sizebytes, enum gvm_dump_type_t mem_type, int seq_no)
+{
+	int ret = 0;
+	int rval = 0;
+	struct gsl_hab_payload *send_buf = NULL;
+	struct gsl_hab_payload *recv_buf = NULL;
+	int hab_exp_flags = 0;
+	int memory_export_status = -1;
+	void  *hab_exp_handle = NULL;
+	uint32_t export_id = 0;
+	struct memory_export_params_t rpc_params = { 0 };
+	struct hgsl_hab_channel_t *hab_channel = NULL;
+
+	RPC_TRACE();
+	ret = hgsl_hyp_channel_pool_get(hyp_priv, 0, &hab_channel);
+	if (ret) {
+		LOGE("failed to open hab channel with err code %d", ret);
+		goto exit;
+	}
+
+	ret = hgsl_rpc_parcel_reset(hab_channel);
+	if (ret) {
+		LOGE("hgsl_rpc_parcel_reset failed %d", ret);
+		goto exit;
+	}
+
+	if (buf_sizebytes) {
+		if (!mem_node || !mem_node->dma_buf) {
+			LOGE("Invalid memnode or dmabuf");
+			goto exit;
+		}
+
+		send_buf = &hab_channel->send_buf;
+		recv_buf = &hab_channel->recv_buf;
+
+		hab_exp_flags = HABMM_EXPIMP_FLAGS_DMABUF;
+		hab_exp_handle = (void *)mem_node->dma_buf;
+		ret = habmm_export(hab_channel->socket, hab_exp_handle,
+			buf_sizebytes, &export_id, hab_exp_flags);
+		memory_export_status = ret;
+		if (ret) {
+			LOGE("export failed, fd(%d), dma_buf(%p)",
+					mem_node->fd, mem_node->dma_buf);
+			LOGE("size(%d), hab flags(0x%X) ret(%d)",
+					buf_sizebytes, hab_exp_flags, ret);
+			goto send_cmd;
+		}
+	} else {
+		LOGE("Failed to parse ib1!");
+		goto out;
+	}
+
+send_cmd:
+	rpc_params.size = sizeof(rpc_params);
+	rpc_params.mem_size = buf_sizebytes;
+	rpc_params.devhandle = devhandle;
+	rpc_params.mem_type = mem_type;
+	rpc_params.seq_no = seq_no;
+	rpc_params.used_size = used_size;
+	rpc_params.export_id = export_id;
+	ret = gsl_rpc_write(send_buf, &rpc_params, sizeof(rpc_params));
+	if (ret) {
+		LOGE("gsl_rpc_write failed, %d", ret);
+		goto out;
+	}
+
+	ret = gsl_rpc_transact(RPC_GVM_STATE_DUMP, hab_channel);
+	if (ret) {
+		LOGE("gsl_rpc_transact_interrruptible failed, %d", ret);
+		goto out;
+	}
+
+	ret = gsl_rpc_read_int32_l(recv_buf, &rval);
+	if (ret)
+		LOGE("gsl_rpc_read failed, ret = %d rval = %d", ret, rval);
+
+out:
+	if (memory_export_status == 0) {
+		ret = habmm_unexport(hab_channel->socket, export_id, 0);
+		if (ret)
+			LOGE("habmm_unexport failed export_id %d ret = %d", export_id, ret);
+	}
+
+exit:
+	hgsl_hyp_channel_pool_put(hab_channel);
+	RPC_TRACE_DONE();
 }
