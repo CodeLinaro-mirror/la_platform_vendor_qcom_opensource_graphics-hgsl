@@ -1069,6 +1069,52 @@ out:
 	return ret;
 }
 
+int hgsl_hyp_notify_pm_state(struct hgsl_hyp_priv_t *priv,
+	uint32_t pm_state, enum gsl_devhandle_t devhandle, int32_t *rval)
+{
+	struct pm_state_notify_params_t rpc_params = { 0 };
+	struct hgsl_hab_channel_t *hab_channel = NULL;
+	struct gsl_hab_payload *send_buf = NULL;
+	struct gsl_hab_payload *recv_buf = NULL;
+	int ret = 0;
+
+	RPC_TRACE();
+	ret = hgsl_hyp_channel_pool_get(priv, 0, &hab_channel);
+	if (ret) {
+		LOGE("Failed to get hab channel %d", ret);
+		goto out;
+	}
+
+	send_buf = &hab_channel->send_buf;
+	recv_buf = &hab_channel->recv_buf;
+
+	rpc_params.size = sizeof(rpc_params);
+	rpc_params.devhandle = devhandle;
+	rpc_params.pm_state = pm_state;
+
+	ret = gsl_rpc_write(send_buf, &rpc_params, sizeof(rpc_params));
+	if (ret) {
+		LOGE("gsl_rpc_write failed, %d", ret);
+		goto out;
+	}
+	ret = gsl_rpc_transact(RPC_NOTIFY_PM_STATE, hab_channel);
+	if (ret) {
+		LOGE("gsl_rpc_transact failed, %d", ret);
+		goto out;
+	}
+	ret = gsl_rpc_read_int32_l(recv_buf, rval);
+	if (ret) {
+		LOGE("gsl_rpc_read_int32_l failed, %d", ret);
+		goto out;
+	}
+
+out:
+	LOGD("%d, %d", ret, *rval);
+	hgsl_hyp_channel_pool_put(hab_channel);
+	RPC_TRACE_DONE();
+	return ret;
+}
+
 int hgsl_hyp_ctxt_create(struct hgsl_hab_channel_t *hab_channel,
 	struct hgsl_ioctl_ctxt_create_params *hgsl_params)
 {
