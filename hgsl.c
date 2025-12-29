@@ -871,7 +871,8 @@ static int hgsl_init_global_db(struct qcom_hgsl *hgsl,
 	}
 
 	if (!is_sender && !hgsl->wq) {
-		hgsl->wq = alloc_workqueue("hgsl-wq", WQ_HIGHPRI, 0);
+		hgsl->wq = alloc_workqueue(
+			"hgsl-wq", WQ_HIGHPRI | WQ_MEM_RECLAIM, 0);
 		if (!hgsl->wq) {
 			dev_err(dev, "failed to create workqueue\n");
 			ret = -ENOMEM;
@@ -1139,7 +1140,7 @@ static int hgsl_init_ipcq_memnode(struct qcom_hgsl *hgsl, int allocate_size,
 
 	if (!node) {
 		LOGE("failed to allocate ipcq memory node");
-		ret = ENOMEM;
+		ret = -ENOMEM;
 		goto out;
 	}
 
@@ -4067,7 +4068,8 @@ static int hgsl_init_release_wq(struct qcom_hgsl *hgsl)
 {
 	int ret = 0;
 
-	hgsl->release_wq = alloc_workqueue("hgsl-release-wq", WQ_HIGHPRI, 0);
+	hgsl->release_wq = alloc_workqueue(
+		"hgsl-release-wq", WQ_HIGHPRI | WQ_MEM_RECLAIM, 0);
 	if (IS_ERR_OR_NULL(hgsl->release_wq)) {
 		dev_err(hgsl->dev, "failed to create workqueue\n");
 		ret = PTR_ERR(hgsl->release_wq);

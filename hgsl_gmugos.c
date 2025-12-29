@@ -387,9 +387,9 @@ int hgsl_init_gmugos(struct platform_device *pdev, uint32_t devhandle,
 	struct qcom_hgsl *hgsl = platform_get_drvdata(pdev);
 	struct hgsl_gmugos *gmugos;
 	struct hgsl_gmugos_irq *gmugos_irq;
+	char *name;
 	int ret = 0;
 	u32 dev_id = hgsl_hnd2id(devhandle);
-	char irq_name[HGSL_GMUGOS_NAME_LEN];
 	int irq_num = 0;
 
 	if (dev_id >= HGSL_DEVICE_NUM) {
@@ -406,7 +406,7 @@ int hgsl_init_gmugos(struct platform_device *pdev, uint32_t devhandle,
 	mutex_lock(&hgsl->mutex);
 	gmugos = &hgsl->gmugos[dev_id];
 	if ((gmugos->activated_irq[dev_id][irq_idx] & mask_bits) == mask_bits) {
-		LOGE("mask bit 0x%x already enabled, id %d idx %d", mask_bits, dev_id, irq_idx);
+		LOGD("mask bit 0x%x already enabled, id %d idx %d", mask_bits, dev_id, irq_idx);
 		goto out;
 	}
 
@@ -416,26 +416,24 @@ int hgsl_init_gmugos(struct platform_device *pdev, uint32_t devhandle,
 
 	gmugos->dev_hnd = devhandle;
 	gmugos_irq = &gmugos->irq[irq_idx];
-	snprintf(irq_name, sizeof(irq_name), "hgsl_gmugos%u_irq%u",
+	name = gmugos_irq->name;
+	snprintf(name, sizeof(gmugos_irq->name), "hgsl_gmugos%u_irq%u",
 			dev_id, irq_idx);
 
 	if (mask_bits & RGSGOS_IRQ_MASK) {
 		if (!gmugos_irq->irq_workqueue) {
-			char irq_wq_name[HGSL_GMUGOS_WQ_NAME_LEN];
-
-			snprintf(irq_wq_name, sizeof(irq_wq_name), "%s_workqueue",
-				irq_name);
-			gmugos_irq->irq_workqueue = alloc_workqueue(irq_wq_name, WQ_UNBOUND, 1);
+			gmugos_irq->irq_workqueue =
+				alloc_ordered_workqueue("%s_workqueue", WQ_MEM_RECLAIM, name);
 			if (IS_ERR_OR_NULL(gmugos_irq->irq_workqueue)) {
-				LOGE("FAILED to allocated %s wq", irq_wq_name);
-				ret = ENOMEM;
+				LOGE("FAILED to allocated %s_workqueue", name);
+				ret = -ENOMEM;
 				goto out;
 			} else {
 				INIT_WORK(&gmugos_irq->irq_work, hgsl_gmugos_handle_ipcq_msg);
 			}
 		}
 	} else if (mask_bits & GMUGOS_IRQ_MASK) {
-		LOGI("Enable GMUGOS mask, name %s", irq_name);
+		LOGI("Enable GMUGOS mask, name %s", name);
 	} else {
 		LOGE("invalid maskbit provided, 0x%x", mask_bits);
 		ret = -EFAULT;
@@ -445,11 +443,11 @@ int hgsl_init_gmugos(struct platform_device *pdev, uint32_t devhandle,
 	if (gmugos->activated_irq[dev_id][irq_idx])
 		goto add_mask;
 
-	irq_num = hgsl_gmugos_request_irq(pdev, irq_name, hgsl_gmugos_isr,
+	irq_num = hgsl_gmugos_request_irq(pdev, name, hgsl_gmugos_isr,
 				hgsl_gmugos_ts_retire, gmugos_irq);
 	if (irq_num < 0) {
 		dev_err(&pdev->dev, "failed to request gmugos irq %s, irq %u\n",
-			irq_name, irq_num);
+			name, irq_num);
 		goto out;
 	}
 
