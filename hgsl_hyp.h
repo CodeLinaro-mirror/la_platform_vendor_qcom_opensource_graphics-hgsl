@@ -280,8 +280,8 @@ struct device_open_params_t {
 };
 
 struct device_close_params_t {
-	uint32_t            size;
-	enum gsl_deviceid_t device_id;
+	uint32_t size;
+	uint32_t devhandle;
 };
 
 struct context_create_params_t {
@@ -556,6 +556,8 @@ struct hgsl_init_param_t {
 struct hgsl_deinit_param_t {
 	uint32_t size;
 	uint32_t devhandle;
+	uint32_t pkmd_export_id;
+	uint32_t gmu_export_id;
 };
 
 struct hgsl_gvm_settings {
@@ -696,7 +698,7 @@ int hgsl_hyp_device_open(struct hgsl_hyp_priv_t *priv,
 		uint32_t flags, enum gsl_deviceid_t device_id, int32_t *rval);
 
 int hgsl_hyp_device_close(struct hgsl_hyp_priv_t *priv,
-		int32_t *rval, enum gsl_deviceid_t device_id);
+		int32_t *rval, enum gsl_devhandle_t devhandle);
 
 int hgsl_hyp_activate_device_handle(struct hgsl_hyp_priv_t *priv,
 		struct hgsl_ioctl_activate_device_params *hgsl_param);
