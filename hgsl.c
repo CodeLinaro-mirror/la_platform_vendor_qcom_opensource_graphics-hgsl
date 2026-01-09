@@ -2410,6 +2410,8 @@ out:
 			hgsl_ctxt_destroy(priv, hab_channel, params->devhandle,
 				params->ctxthandle, NULL, false);
 		else if (ctxt && (params->ctxthandle < HGSL_CONTEXT_NUM)) {
+			/* Remove the event group from the list */
+			hgsl_del_event_group(hgsl, &ctxt->event_group);
 			if (!ctxt->is_fe_shadow)
 				_cleanup_shadow(hab_channel, ctxt);
 			hgsl_hyp_ctxt_destroy(hab_channel, ctxt->devhandle,
@@ -2418,8 +2420,10 @@ out:
 			hgsl_dbcq_close(ctxt);
 			if (ctxt->is_fe_shadow)
 				_cleanup_shadow(hab_channel, ctxt);
-			kfree(ctxt);
+
+			kfree(ctxt->timeline);
 		}
+		hgsl_free(ctxt);
 		LOGE("failed to create context");
 	}
 
