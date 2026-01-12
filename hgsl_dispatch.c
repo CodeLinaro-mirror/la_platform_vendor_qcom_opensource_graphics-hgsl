@@ -525,6 +525,20 @@ static void _retire_drawobjs(struct hgsl_context *ctxt)
 	}
 }
 
+void hgsl_reclaim_drawobjs(struct hgsl_context *ctxt)
+{
+	struct hgsl_dispatch_context *dispatch = ctxt->dispatch;
+
+	rt_mutex_lock(&dispatch->mutex);
+	while (unlikely(!list_empty(&dispatch->drawobj_list))) {
+		_retire_drawobjs(ctxt);
+		rt_mutex_unlock(&dispatch->mutex);
+		usleep_range(100, 1000);
+		rt_mutex_lock(&dispatch->mutex);
+	}
+	rt_mutex_unlock(&dispatch->mutex);
+}
+
 void hgsl_dispatch_ctxt_schedule(struct hgsl_context *ctxt)
 {
 	struct hgsl_dispatch_context *dispatch = ctxt->dispatch;
@@ -619,6 +633,12 @@ int hgsl_dispatch_queue_cmds(
 	}
 
 	spin_lock(&ctxt->drawq_lock);
+
+	if (unlikely(ctxt->in_destroy)) {
+		LOGW("ctx:%d is in destroy, skip dispatch.", ctxt->context_id);
+		ret = -EINVAL;
+		goto out;
+	}
 
 	ret = _check_for_room_in_context_drawq(ctxt, count);
 	if (ret)

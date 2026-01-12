@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include "hgsl.h"
 #include "hgsl_hyp.h"
 #include "hgsl_utils.h"
+#include "hgsl_snapshot.h"
 #include <linux/delay.h>
 #include <linux/dma-buf.h>
 #include <linux/habmm.h>
@@ -117,6 +118,9 @@ static const char * const gsl_rpc_func_names[] = {
 	"RPC_DEVICE_GETFEATURES",
 	"RPC_DEVICE_ACTIVATE",
 	"RPC_GVM_INIT",
+	"RPC_GVM_DEINIT",
+	"RPC_NOTIFY_PM_STATE",
+	"RPC_GVM_STATE_DUMP",
 	"RPC_FUNC_LAST" // insert new func BEFORE this line!
 };
 
@@ -699,72 +703,6 @@ int hgsl_hyp_channel_pool_get(
 	return ret;
 }
 
-// this is a temporary function that to be replaced in the future
-int hgsl_hyp_query_gvm_setting(struct hgsl_hyp_priv_t *priv,
-		struct hgsl_init_param_t *ptr_ipcq_settings,
-		struct hgsl_gvm_settings *ptr_gvm_settings)
-{
-	struct hgsl_hab_channel_t *hab_channel = NULL;
-	struct gsl_hab_payload *send_buf = NULL;
-	struct gsl_hab_payload *recv_buf = NULL;
-	int ret = 0;
-	int rval = 0;
-
-	RPC_TRACE();
-	ret = hgsl_hyp_channel_pool_get(priv, 0, &hab_channel);
-	if (ret) {
-		LOGE("failed to open global hab channel with err code %d", ret);
-		goto out;
-	}
-
-	ret = hgsl_rpc_parcel_reset(hab_channel);
-	if (ret) {
-		LOGE("hgsl_rpc_parcel_reset failed %d", ret);
-		goto err;
-	}
-
-	send_buf = &hab_channel->send_buf;
-	recv_buf = &hab_channel->recv_buf;
-
-	ret = gsl_rpc_write(send_buf, ptr_ipcq_settings,
-			sizeof(struct hgsl_init_param_t));
-	if (ret) {
-		LOGE("gsl_rpc_write failed, %d", ret);
-		goto err;
-	}
-
-	ret = gsl_rpc_transact(RPC_GVM_INIT, hab_channel);
-	if (ret) {
-		LOGE("gsl_rpc_transact failed, %d", ret);
-		goto err;
-	}
-
-	ret = gsl_rpc_read_int32_l(recv_buf, &rval);
-	if (ret) {
-		LOGE("gsl_rpc_read_int32_l() failed to query GVM setting from BE, ret=%d", ret);
-		goto err;
-	}
-	if (rval != GSL_SUCCESS) {
-		LOGE("RPC_GVM_INIT failed with rval=%d", rval);
-		ret = -EINVAL;
-		goto err;
-	}
-
-	ret = gsl_rpc_read(recv_buf, ptr_gvm_settings,
-			sizeof(struct hgsl_gvm_settings));
-	if (ret) {
-		LOGE("gsl_rpc_read failed to read GVM settings from BE, %d", ret);
-		goto err;
-	}
-
-err:
-	hgsl_hyp_channel_pool_put(hab_channel);
-out:
-	LOGD("%d, %d", ret, rval);
-	RPC_TRACE_DONE();
-	return ret;
-}
-
 static int hgsl_hyp_channel_pool_init(struct hgsl_hyp_priv_t *priv,
 	int client_pid, const char * const client_name)
 {
@@ -1126,6 +1064,52 @@ int hgsl_hyp_activate_device_handle(struct hgsl_hyp_priv_t *priv,
 
 out:
 	LOGD("%d, %u", ret, rval);
+	hgsl_hyp_channel_pool_put(hab_channel);
+	RPC_TRACE_DONE();
+	return ret;
+}
+
+int hgsl_hyp_notify_pm_state(struct hgsl_hyp_priv_t *priv,
+	uint32_t pm_state, enum gsl_devhandle_t devhandle, int32_t *rval)
+{
+	struct pm_state_notify_params_t rpc_params = { 0 };
+	struct hgsl_hab_channel_t *hab_channel = NULL;
+	struct gsl_hab_payload *send_buf = NULL;
+	struct gsl_hab_payload *recv_buf = NULL;
+	int ret = 0;
+
+	RPC_TRACE();
+	ret = hgsl_hyp_channel_pool_get(priv, 0, &hab_channel);
+	if (ret) {
+		LOGE("Failed to get hab channel %d", ret);
+		goto out;
+	}
+
+	send_buf = &hab_channel->send_buf;
+	recv_buf = &hab_channel->recv_buf;
+
+	rpc_params.size = sizeof(rpc_params);
+	rpc_params.devhandle = devhandle;
+	rpc_params.pm_state = pm_state;
+
+	ret = gsl_rpc_write(send_buf, &rpc_params, sizeof(rpc_params));
+	if (ret) {
+		LOGE("gsl_rpc_write failed, %d", ret);
+		goto out;
+	}
+	ret = gsl_rpc_transact(RPC_NOTIFY_PM_STATE, hab_channel);
+	if (ret) {
+		LOGE("gsl_rpc_transact failed, %d", ret);
+		goto out;
+	}
+	ret = gsl_rpc_read_int32_l(recv_buf, rval);
+	if (ret) {
+		LOGE("gsl_rpc_read_int32_l failed, %d", ret);
+		goto out;
+	}
+
+out:
+	LOGD("%d, %d", ret, *rval);
 	hgsl_hyp_channel_pool_put(hab_channel);
 	RPC_TRACE_DONE();
 	return ret;
@@ -2752,6 +2736,203 @@ out:
 	return ret;
 }
 
+int hgsl_hyp_export_ipc_queue(struct qcom_hgsl *hgsl, int dev_idx)
+{
+	struct hgsl_hab_channel_t *hab_channel = NULL;
+	struct gsl_hab_payload *send_buf = NULL;
+	struct gsl_hab_payload *recv_buf = NULL;
+	struct hgsl_mem_node *pkmd_mem_node = hgsl->ipcq_memnode[dev_idx][HGSL_IPCQ_RGS_IDX];
+	struct hgsl_mem_node *gmu_mem_node = hgsl->ipcq_memnode[dev_idx][HGSL_IPCQ_GMU_IDX];
+	int ret = 0;
+	int status = 0;
+	int hab_exp_flags = 0;
+	void *hab_exp_handle = NULL;
+	int export_id = 0;
+	struct hgsl_init_param_t *settings = &(hgsl->ipcq_settings[dev_idx]);
+
+	RPC_TRACE();
+
+	ret = hgsl_hyp_channel_pool_get(&hgsl->global_hyp, 0, &hab_channel);
+	if (ret) {
+		LOGE("failed to open hab channel with err code %d", ret);
+		goto out;
+	}
+
+	if (!pkmd_mem_node || !gmu_mem_node) {
+		LOGE("invalid memnode");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	send_buf = &hab_channel->send_buf;
+	recv_buf = &hab_channel->recv_buf;
+
+	hab_exp_flags = HABMM_EXPIMP_FLAGS_DMABUF;
+	hab_exp_handle = (void *)(pkmd_mem_node->dma_buf);
+	ret = habmm_export(hab_channel->socket, hab_exp_handle,
+		settings->pkmd_dwsize * sizeof(uint32_t),
+		&export_id, hab_exp_flags);
+	if (ret) {
+		LOGE("export pkmd failed, sizedw(%d) ret %d", settings->pkmd_dwsize, ret);
+		goto err;
+	}
+
+	settings->pkmd_export_id  = export_id;
+	hab_exp_handle = (void *)(gmu_mem_node->dma_buf);
+	ret = habmm_export(hab_channel->socket, hab_exp_handle,
+		settings->gmu_dwsize * sizeof(uint32_t),
+		&export_id, hab_exp_flags);
+	if (ret) {
+		LOGE("export gmu failed, sizedw(%d)", settings->gmu_dwsize);
+		LOGE("hab flags(%d) ret(%d)", hab_exp_flags, ret);
+		goto err;
+	}
+
+	settings->gmu_export_id = export_id;
+	ret = gsl_rpc_write(send_buf, &hgsl->ipcq_settings[dev_idx],
+		sizeof(hgsl->ipcq_settings[dev_idx]));
+	if (ret) {
+		LOGE("gsl_rpc_write failed, %d", ret);
+		goto err;
+	}
+
+	ret = gsl_rpc_transact(RPC_GVM_INIT, hab_channel);
+	if (ret) {
+		LOGE("gsl_rpc_transact failed, %d", ret);
+		goto err;
+	}
+
+	if (gsl_rpc_read_int32_l(recv_buf, &ret)) {
+		LOGE("gsl_rpc_read_int32_l failed");
+		goto err;
+	}
+
+	if (ret) {
+		LOGE("RPC_GVM_INIT failed in Backend ret=%d", ret);
+		goto err;
+	}
+
+	ret = gsl_rpc_read(recv_buf, &(hgsl->gvm_settings[dev_idx]),
+		sizeof(struct hgsl_gvm_settings));
+	if (ret) {
+		LOGE("gsl_rpc_read failed, %d", ret);
+		goto err;
+	}
+
+	hgsl->irq_index = hgsl->gvm_settings[dev_idx].irq_index;
+	goto out;
+err:
+	if (settings->pkmd_export_id != 0) {
+		status = habmm_unexport(hab_channel->socket,
+			hgsl->ipcq_settings[dev_idx].pkmd_export_id, 0);
+		if (status)
+			LOGE("habmm_unexport failed for pkmd, socket %d export_id %d",
+				hgsl->ipcq_settings[dev_idx].pkmd_export_id);
+
+		settings->pkmd_export_id = 0;
+	}
+
+	if (settings->gmu_export_id != 0) {
+		status = habmm_unexport(hab_channel->socket,
+					hgsl->ipcq_settings[dev_idx].gmu_export_id, 0);
+		if (status)
+			LOGE("habmm_unexport failed for gmu, export id %d",
+				hgsl->ipcq_settings[dev_idx].gmu_export_id);
+
+		settings->gmu_export_id = 0;
+	}
+
+out:
+	hgsl_hyp_channel_pool_put(hab_channel);
+	RPC_TRACE_DONE();
+	return ret;
+}
+
+void hgsl_hyp_deinit_ipcq(struct qcom_hgsl *hgsl, int dev_idx)
+{
+	int i = 0;
+	int ret = 0;
+	int retval = 0;
+	struct hgsl_hab_channel_t *hab_channel = NULL;
+	struct gsl_hab_payload *send_buf = NULL;
+	struct gsl_hab_payload *recv_buf = NULL;
+	struct hgsl_deinit_param_t param = {0};
+
+	ret = hgsl_hyp_channel_pool_get(&hgsl->global_hyp, 0, &hab_channel);
+	if (ret) {
+		LOGE("failed to open hab channel with err code %d", ret);
+		return;
+	}
+
+	ret = hgsl_rpc_parcel_reset(hab_channel);
+	if (ret) {
+		LOGE("hgsl_rpc_parcel_reset failed %d", ret);
+		return;
+	}
+
+	send_buf = &hab_channel->send_buf;
+	recv_buf = &hab_channel->recv_buf;
+	param.size = sizeof(struct hgsl_deinit_param_t);
+	param.devhandle = hgsl->device_handle[dev_idx];
+
+	ret = gsl_rpc_write(send_buf, &param, sizeof(struct hgsl_deinit_param_t));
+	if (ret) {
+		LOGE("gsl_rpc_write failed, %d", ret);
+		return;
+	}
+
+	ret = gsl_rpc_transact(RPC_GVM_DEINIT, hab_channel);
+	if (ret) {
+		LOGE("gsl_rpc_transact failed, %d", ret);
+		return;
+	}
+
+	ret = gsl_rpc_read(recv_buf, &retval, sizeof(retval));
+	if (ret) {
+		LOGE("gsl_rpc_read failed, %d", ret);
+		return;
+	}
+
+	if (retval) {
+		LOGE("FAILED to deinit the ipcq from device %d", dev_idx);
+		return;
+	}
+
+	if (hgsl->ipcq_settings[dev_idx].pkmd_export_id != 0) {
+		ret = habmm_unexport(hab_channel->socket,
+			hgsl->ipcq_settings[dev_idx].pkmd_export_id, 0);
+		if (ret)
+			LOGE("habmm_unexport failed for pkmd, socket %d export_id %d",
+				hgsl->ipcq_settings[dev_idx].pkmd_export_id);
+
+		hgsl->ipcq_settings[dev_idx].pkmd_export_id = 0;
+	}
+
+	if (hgsl->ipcq_settings[dev_idx].gmu_export_id != 0) {
+		ret = habmm_unexport(hab_channel->socket,
+					hgsl->ipcq_settings[dev_idx].gmu_export_id, 0);
+		if (ret)
+			LOGE("habmm_unexport failed for gmu, export id %d",
+				hgsl->ipcq_settings[dev_idx].gmu_export_id);
+
+		hgsl->ipcq_settings[dev_idx].gmu_export_id = 0;
+	}
+
+	hgsl_hyp_channel_pool_put(hab_channel);
+	for (i = 0; i < HGSL_IPCQ_NUM; i++) {
+		if (hgsl->ipcq_memnode[dev_idx][i] && hgsl->ipcq_memnode[dev_idx][i]->dma_buf) {
+			dma_buf_vunmap_unlocked(hgsl->ipcq_memnode[dev_idx][i]->dma_buf,
+				&(hgsl->ipcq_memnode_vmap[dev_idx][i]));
+			dma_buf_end_cpu_access(hgsl->ipcq_memnode[dev_idx][i]->dma_buf,
+				DMA_BIDIRECTIONAL);
+			memset(&(hgsl->ipcq_memnode_vmap[dev_idx][i]), 0, sizeof(struct iosys_map));
+		}
+
+		hgsl_sharedmem_free(hgsl->ipcq_memnode[dev_idx][i]);
+		hgsl->ipcq_memnode[dev_idx][i] = NULL;
+	}
+}
+
 static int export_fill_shadow_ts_buf(struct hgsl_hab_channel_t *hab_channel,
 	struct hgsl_mem_node *mem_node, struct memory_map_ext_fd_params_t *shadow_map_p)
 {
@@ -3360,7 +3541,6 @@ out:
 	return ret;
 }
 
-
 int hgsl_hyp_gslprofiler_per_proc_gpu_busy(struct hgsl_hyp_priv_t *priv,
 	struct hgsl_ioctl_gslprofiler_per_proc_gpu_busy_params *hgsl_param,
 	struct gsl_profiler_get_per_proc_gpu_busy_percentage_t *busy)
@@ -3530,4 +3710,95 @@ out:
 	hgsl_hyp_channel_pool_put(hab_channel);
 	RPC_TRACE_DONE();
 	return ret;
+}
+
+/* set buf_sizebytes to 0 in case a failure in parsing ib */
+void hgsl_hyp_export_memory(struct hgsl_hyp_priv_t *hyp_priv,
+	uint32_t devhandle, struct hgsl_mem_node *mem_node, uint32_t used_size,
+	uint32_t buf_sizebytes, enum gvm_dump_type_t mem_type, int seq_no)
+{
+	int ret = 0;
+	int rval = 0;
+	struct gsl_hab_payload *send_buf = NULL;
+	struct gsl_hab_payload *recv_buf = NULL;
+	int hab_exp_flags = 0;
+	int memory_export_status = -1;
+	void  *hab_exp_handle = NULL;
+	uint32_t export_id = 0;
+	struct memory_export_params_t rpc_params = { 0 };
+	struct hgsl_hab_channel_t *hab_channel = NULL;
+
+	RPC_TRACE();
+	ret = hgsl_hyp_channel_pool_get(hyp_priv, 0, &hab_channel);
+	if (ret) {
+		LOGE("failed to open hab channel with err code %d", ret);
+		goto exit;
+	}
+
+	ret = hgsl_rpc_parcel_reset(hab_channel);
+	if (ret) {
+		LOGE("hgsl_rpc_parcel_reset failed %d", ret);
+		goto exit;
+	}
+
+	if (buf_sizebytes) {
+		if (!mem_node || !mem_node->dma_buf) {
+			LOGE("Invalid memnode or dmabuf");
+			goto exit;
+		}
+
+		send_buf = &hab_channel->send_buf;
+		recv_buf = &hab_channel->recv_buf;
+
+		hab_exp_flags = HABMM_EXPIMP_FLAGS_DMABUF;
+		hab_exp_handle = (void *)mem_node->dma_buf;
+		ret = habmm_export(hab_channel->socket, hab_exp_handle,
+			buf_sizebytes, &export_id, hab_exp_flags);
+		memory_export_status = ret;
+		if (ret) {
+			LOGE("export failed, fd(%d), dma_buf(%p)",
+					mem_node->fd, mem_node->dma_buf);
+			LOGE("size(%d), hab flags(0x%X) ret(%d)",
+					buf_sizebytes, hab_exp_flags, ret);
+			goto send_cmd;
+		}
+	} else {
+		LOGE("Failed to parse ib1!");
+		goto out;
+	}
+
+send_cmd:
+	rpc_params.size = sizeof(rpc_params);
+	rpc_params.mem_size = buf_sizebytes;
+	rpc_params.devhandle = devhandle;
+	rpc_params.mem_type = mem_type;
+	rpc_params.seq_no = seq_no;
+	rpc_params.used_size = used_size;
+	rpc_params.export_id = export_id;
+	ret = gsl_rpc_write(send_buf, &rpc_params, sizeof(rpc_params));
+	if (ret) {
+		LOGE("gsl_rpc_write failed, %d", ret);
+		goto out;
+	}
+
+	ret = gsl_rpc_transact(RPC_GVM_STATE_DUMP, hab_channel);
+	if (ret) {
+		LOGE("gsl_rpc_transact_interrruptible failed, %d", ret);
+		goto out;
+	}
+
+	ret = gsl_rpc_read_int32_l(recv_buf, &rval);
+	if (ret)
+		LOGE("gsl_rpc_read failed, ret = %d rval = %d", ret, rval);
+
+out:
+	if (memory_export_status == 0) {
+		ret = habmm_unexport(hab_channel->socket, export_id, 0);
+		if (ret)
+			LOGE("habmm_unexport failed export_id %d ret = %d", export_id, ret);
+	}
+
+exit:
+	hgsl_hyp_channel_pool_put(hab_channel);
+	RPC_TRACE_DONE();
 }
