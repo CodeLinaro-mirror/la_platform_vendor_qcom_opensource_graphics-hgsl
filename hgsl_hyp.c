@@ -2887,7 +2887,7 @@ void hgsl_hyp_deinit_ipcq(struct qcom_hgsl *hgsl, int dev_idx)
 		return;
 	}
 
-	ret = gsl_rpc_read(recv_buf, &retval, sizeof(retval));
+	ret = gsl_rpc_read_int32_l(recv_buf, &retval);
 	if (ret) {
 		LOGE("gsl_rpc_read failed, %d", ret);
 		return;

@@ -75,6 +75,7 @@ static void hgsl_snapshot_dump(struct qcom_hgsl *hgsl_dev, uint32_t *msg_buffer,
 	priv = ctxt->priv;
 	if (!priv) {
 		LOGE("Invalid hgsl_priv!");
+		hgsl_put_context(ctxt);
 		return;
 	}
 
@@ -119,6 +120,8 @@ send_msg:
 
 	if (mem_node)
 		hgsl_sharedmem_free(mem_node);
+
+	hgsl_put_context(ctxt);
 }
 
 /* Return updated read/write index after removing/adding message with size msg_size.
