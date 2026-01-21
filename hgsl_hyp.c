@@ -968,9 +968,9 @@ out:
 }
 
 int hgsl_hyp_device_close(struct hgsl_hyp_priv_t *priv,
-		int32_t *rval, enum gsl_deviceid_t device_id)
+		int32_t *rval, enum gsl_devhandle_t devhandle)
 {
-	struct device_open_params_t rpc_params = { 0 };
+	struct device_close_params_t rpc_params = { 0 };
 	struct hgsl_hab_channel_t *hab_channel = NULL;
 	struct gsl_hab_payload *send_buf = NULL;
 	struct gsl_hab_payload *recv_buf = NULL;
@@ -987,7 +987,7 @@ int hgsl_hyp_device_close(struct hgsl_hyp_priv_t *priv,
 	recv_buf = &hab_channel->recv_buf;
 
 	rpc_params.size = sizeof(rpc_params);
-	rpc_params.device_id = device_id;
+	rpc_params.devhandle = devhandle;
 
 	ret = gsl_rpc_write(send_buf, &rpc_params, sizeof(rpc_params));
 	if (ret) {
@@ -2802,6 +2802,13 @@ int hgsl_hyp_export_ipc_queue(struct qcom_hgsl *hgsl, int dev_idx)
 		goto err;
 	}
 
+	/*
+	 * Set the gvm_init_done flag so that if any error occurs afterwards then
+	 * hgsl can send the RPC_GVM_DEINIT request to RGS to deallocate the memory
+	 * resources.
+	 */
+	hgsl->gvm_init_done[dev_idx] = true;
+
 	if (gsl_rpc_read_int32_l(recv_buf, &ret)) {
 		LOGE("gsl_rpc_read_int32_l failed");
 		goto err;
@@ -2858,45 +2865,53 @@ void hgsl_hyp_deinit_ipcq(struct qcom_hgsl *hgsl, int dev_idx)
 	struct gsl_hab_payload *recv_buf = NULL;
 	struct hgsl_deinit_param_t param = {0};
 
+	if (!hgsl->gvm_init_done[dev_idx])
+		return;
+
 	ret = hgsl_hyp_channel_pool_get(&hgsl->global_hyp, 0, &hab_channel);
 	if (ret) {
 		LOGE("failed to open hab channel with err code %d", ret);
-		return;
+		goto exit;
 	}
 
 	ret = hgsl_rpc_parcel_reset(hab_channel);
 	if (ret) {
 		LOGE("hgsl_rpc_parcel_reset failed %d", ret);
-		return;
+		goto exit;
 	}
 
 	send_buf = &hab_channel->send_buf;
 	recv_buf = &hab_channel->recv_buf;
 	param.size = sizeof(struct hgsl_deinit_param_t);
 	param.devhandle = hgsl->device_handle[dev_idx];
+	param.gmu_export_id = hgsl->ipcq_settings[dev_idx].gmu_export_id;
+	param.pkmd_export_id = hgsl->ipcq_settings[dev_idx].pkmd_export_id;
 
 	ret = gsl_rpc_write(send_buf, &param, sizeof(struct hgsl_deinit_param_t));
 	if (ret) {
 		LOGE("gsl_rpc_write failed, %d", ret);
-		return;
+		goto exit;
 	}
 
 	ret = gsl_rpc_transact(RPC_GVM_DEINIT, hab_channel);
 	if (ret) {
 		LOGE("gsl_rpc_transact failed, %d", ret);
-		return;
+		goto exit;
 	}
 
 	ret = gsl_rpc_read_int32_l(recv_buf, &retval);
 	if (ret) {
 		LOGE("gsl_rpc_read failed, %d", ret);
-		return;
+		goto exit;
 	}
 
 	if (retval) {
 		LOGE("FAILED to deinit the ipcq from device %d", dev_idx);
-		return;
+		goto exit;
 	}
+
+	hgsl->gvm_init_done[dev_idx] = false;
+
 
 	if (hgsl->ipcq_settings[dev_idx].pkmd_export_id != 0) {
 		ret = habmm_unexport(hab_channel->socket,
@@ -2918,7 +2933,6 @@ void hgsl_hyp_deinit_ipcq(struct qcom_hgsl *hgsl, int dev_idx)
 		hgsl->ipcq_settings[dev_idx].gmu_export_id = 0;
 	}
 
-	hgsl_hyp_channel_pool_put(hab_channel);
 	for (i = 0; i < HGSL_IPCQ_NUM; i++) {
 		if (hgsl->ipcq_memnode[dev_idx][i] && hgsl->ipcq_memnode[dev_idx][i]->dma_buf) {
 			dma_buf_vunmap_unlocked(hgsl->ipcq_memnode[dev_idx][i]->dma_buf,
@@ -2931,6 +2945,9 @@ void hgsl_hyp_deinit_ipcq(struct qcom_hgsl *hgsl, int dev_idx)
 		hgsl_sharedmem_free(hgsl->ipcq_memnode[dev_idx][i]);
 		hgsl->ipcq_memnode[dev_idx][i] = NULL;
 	}
+
+exit:
+	hgsl_hyp_channel_pool_put(hab_channel);
 }
 
 static int export_fill_shadow_ts_buf(struct hgsl_hab_channel_t *hab_channel,

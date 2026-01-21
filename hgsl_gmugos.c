@@ -480,12 +480,12 @@ int hgsl_init_gmugos(struct platform_device *pdev, uint32_t devhandle,
 	int irq_num = 0;
 
 	if (dev_id >= HGSL_DEVICE_NUM) {
-		dev_err(&pdev->dev, "Invalid dev handle %u\n", devhandle);
+		LOGE("Invalid dev handle %u for dev_id %u\n", devhandle, dev_id);
 		return -EFAULT;
 	}
 
 	if (irq_idx >= HGSL_GMUGOS_IRQ_NUM) {
-		dev_err(&pdev->dev, "Invalid irq index %u\n", irq_idx);
+		LOGE("Invalid irq index %u for devhandle %u\n", irq_idx, devhandle);
 		ret = -EFAULT;
 		return ret;
 	}
