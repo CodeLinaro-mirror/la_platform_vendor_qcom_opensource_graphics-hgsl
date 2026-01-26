@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include "hgsl_memory.h"
@@ -733,10 +733,16 @@ void hgsl_sharedmem_free(struct hgsl_mem_node *mem_node)
 
 	hgsl_put_sgt(mem_node, true);
 
-	if (mem_node->dma_buf)
+	if (mem_node->dma_buf) {
+		if (mem_node->kva_map.vaddr) {
+			dma_buf_vunmap_unlocked(mem_node->dma_buf, &mem_node->kva_map);
+			dma_buf_end_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
+		}
+
 		dma_buf_put(mem_node->dma_buf);
-	else
+	} else {
 		hgsl_mem_free_actual(mem_node);
+	}
 
 }
 

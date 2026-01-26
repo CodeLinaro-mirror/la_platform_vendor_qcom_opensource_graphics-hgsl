@@ -1240,7 +1240,7 @@ static int hgsl_allocate_per_device_ipc_queues(struct qcom_hgsl *hgsl, uint32_t 
 
 	ret = hgsl_hyp_export_ipc_queue(hgsl, dev_idx);
 	if (ret) {
-		LOGE("Failed to export ipcq %d\n", ret);
+		LOGI("Failed to export ipcq %d\n", ret);
 		goto err;
 	}
 
@@ -1288,7 +1288,7 @@ static int hgsl_allocate_ipc_queues(struct qcom_hgsl *hgsl, uint32_t dev_idx)
 
 	ret = hgsl_allocate_per_device_ipc_queues(hgsl, dev_idx);
 	if (ret) {
-		LOGE("failed to alloc ipc queues for dev %d, ret %d", dev_idx, ret);
+		LOGI("failed to alloc ipc queues for dev %d, ret %d", dev_idx, ret);
 	}
 
 out:
@@ -2410,6 +2410,8 @@ out:
 			hgsl_ctxt_destroy(priv, hab_channel, params->devhandle,
 				params->ctxthandle, NULL, false);
 		else if (ctxt && (params->ctxthandle < HGSL_CONTEXT_NUM)) {
+			/* Remove the event group from the list */
+			hgsl_del_event_group(hgsl, &ctxt->event_group);
 			if (!ctxt->is_fe_shadow)
 				_cleanup_shadow(hab_channel, ctxt);
 			hgsl_hyp_ctxt_destroy(hab_channel, ctxt->devhandle,
@@ -2418,8 +2420,10 @@ out:
 			hgsl_dbcq_close(ctxt);
 			if (ctxt->is_fe_shadow)
 				_cleanup_shadow(hab_channel, ctxt);
-			kfree(ctxt);
+
+			kfree(ctxt->timeline);
 		}
+		hgsl_free(ctxt);
 		LOGE("failed to create context");
 	}
 
@@ -4894,6 +4898,7 @@ static int hgsl_suspend(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 	struct qcom_hgsl *hgsl = platform_get_drvdata(pdev);
 
+	LOGD("+");
 	if (hgsl->events_worker)
 		kthread_flush_worker(hgsl->events_worker);
 	if (hgsl->wq)
@@ -4910,42 +4915,79 @@ static int hgsl_resume(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 	struct qcom_hgsl *hgsl = platform_get_drvdata(pdev);
 	struct hgsl_tcsr *tcsr = NULL;
-	int tcsr_idx = 0;
+	int tcsr_idx = 0, ret = 0, rval = 0;
 	struct hgsl_gmugos *gmugos;
 	int i, j;
 
-	if (pm_suspend_target_state == PM_SUSPEND_MEM) {
-		for (tcsr_idx = 0; tcsr_idx < HGSL_TCSR_NUM; tcsr_idx++) {
-			tcsr = hgsl->tcsr[tcsr_idx][HGSL_TCSR_ROLE_RECEIVER];
-			if (tcsr != NULL) {
-				hgsl_tcsr_irq_enable(tcsr,
-					GLB_DB_DEST_TS_RETIRE_IRQ_MASK, true);
-			}
+	LOGD("+");
+	for (tcsr_idx = 0; tcsr_idx < HGSL_TCSR_NUM; tcsr_idx++) {
+		tcsr = hgsl->tcsr[tcsr_idx][HGSL_TCSR_ROLE_RECEIVER];
+		if (tcsr != NULL) {
+			hgsl_tcsr_irq_enable(tcsr,
+				GLB_DB_DEST_TS_RETIRE_IRQ_MASK, true);
 		}
+	}
 
-		mutex_lock(&hgsl->mutex);
-		for (i = 0; i < HGSL_DEVICE_NUM; i++) {
-			gmugos = &hgsl->gmugos[i];
-			for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++)
-				hgsl_gmugos_irq_enable(&gmugos->irq[j],
-					GMUGOS_IRQ_MASK);
-		}
-		mutex_unlock(&hgsl->mutex);
+	mutex_lock(&hgsl->mutex);
+	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
+		gmugos = &hgsl->gmugos[i];
+		for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++)
+			hgsl_gmugos_irq_enable(&gmugos->irq[j],
+				GMUGOS_IRQ_MASK);
+	}
+	mutex_unlock(&hgsl->mutex);
 
-		/*
-		 * There could be a scenario when GVM submit some work to GMU
-		 * just before going to suspend, in this case, the GMU will
-		 * not submit it to RB and when GMU resume(FW reload) happens,
-		 * it submits the work to GPU and fire the ts_retire to GVM.
-		 * At this point, the GVM is not up so it may miss the
-		 * interrupt from GMU so check if there is any ts_retire by
-		 * reading the shadow timestamp.
-		 */
-		if (hgsl->wq != NULL)
-			queue_work(hgsl->wq, &hgsl->ts_retire_work);
+	/*
+		* There could be a scenario when GVM submit some work to GMU
+		* just before going to suspend, in this case, the GMU will
+		* not submit it to RB and when GMU resume(FW reload) happens,
+		* it submits the work to GPU and fire the ts_retire to GVM.
+		* At this point, the GVM is not up so it may miss the
+		* interrupt from GMU so check if there is any ts_retire by
+		* reading the shadow timestamp.
+		*/
+	if (hgsl->wq != NULL)
+		queue_work(hgsl->wq, &hgsl->ts_retire_work);
+
+	if(true == of_property_read_bool(pdev->dev.of_node, "notify-resume")) {
+
+		/* TODO: should we notify for second device here? */
+		ret = hgsl_hyp_notify_pm_state(&hgsl->global_hyp, GSL_RPC_PM_RESUME,
+								GSL_HANDLE_NULL, &rval);
+		if(ret)
+			LOGE("Failed to reregister context after resume ret %d\n", ret);
 	}
 
 	return 0;
+}
+
+static int hgsl_pm_suspend(struct device *dev)
+{
+	LOGD("+");
+	return hgsl_suspend(dev);
+}
+
+static int hgsl_pm_resume(struct device *dev)
+{
+	int ret = 0;
+
+	LOGD("+");
+	if (pm_suspend_target_state == PM_SUSPEND_MEM)
+		ret = hgsl_resume(dev);
+
+	return ret;
+}
+
+static int hgsl_hibernation_suspend(struct device *dev)
+{
+	LOGD("+");
+	return hgsl_suspend(dev);
+}
+
+static int hgsl_hibernation_resume(struct device *dev)
+{
+	LOGD("+");
+	return hgsl_resume(dev);
 }
 
 static int hgsl_bind(struct device *dev)
@@ -5073,10 +5115,15 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 
 		ret = hgsl_allocate_ipc_queues(hgsl_dev, i);
 		if (ret) {
-			LOGE("error in hgsl_allocate_ipc_queues %d", ret);
+			LOGI("error in hgsl_allocate_ipc_queues %d", ret);
 			hgsl_hyp_deinit_ipcq(hgsl_dev, i);
 			continue;
 		}
+
+		ret = hgsl_init_gmugos(pdev, hgsl_dev->device_handle[i],
+		hgsl_dev->irq_index - HGSL_DB_SIGNAL_GMU_GOS_0, RGSGOS_IRQ_MASK);
+		if (ret)
+			LOGE("hgsl_init_gmugos %d failed irq index 0x%x", i, hgsl_dev->irq_index);
 
 		LOGD("gvm settings dev_num %d mask 0x%x, sid %d, cb %d",
 				i, hgsl_dev->gvm_settings[i].enabled_feature_mask,
@@ -5102,13 +5149,6 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 							"default_iocoherency");
 	hgsl_dev->cache_flags.writecombine_enable = of_property_read_bool(pdev->dev.of_node,
 							"writecombine_enable");
-
-	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
-		ret = hgsl_init_gmugos(pdev, hgsl_dev->device_handle[i],
-			hgsl_dev->irq_index - HGSL_DB_SIGNAL_GMU_GOS_0, RGSGOS_IRQ_MASK);
-		if (ret)
-			LOGE("hgsl_init_gmugos %d failed irq index 0x%x", i, hgsl_dev->irq_index);
-	}
 
 	if (hgsl_dev->fv_on) {
 		for_each_matching_node(node, hgsl_component_match) {
@@ -5230,8 +5270,12 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 }
 
 static const struct dev_pm_ops hgsl_pm_ops = {
-	.suspend = hgsl_suspend,
-	.resume = hgsl_resume,
+	.suspend     = hgsl_pm_suspend,
+	.resume      = hgsl_pm_resume,
+	.freeze      = hgsl_hibernation_suspend,
+	.thaw        = hgsl_hibernation_resume,
+	.poweroff    = hgsl_hibernation_suspend,
+	.restore     = hgsl_hibernation_resume,
 };
 
 static const struct of_device_id qcom_hgsl_of_match[] = {
