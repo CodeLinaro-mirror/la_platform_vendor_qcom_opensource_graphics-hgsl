@@ -753,6 +753,7 @@ static void hgsl_hyp_channel_pool_close(struct hgsl_hyp_priv_t *priv)
 	}
 	mutex_unlock(&priv->lock);
 	mutex_destroy(&priv->lock);
+	idr_destroy(&priv->channel_idr);
 	memset(priv, 0, sizeof(*priv));
 }
 

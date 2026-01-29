@@ -4074,9 +4074,9 @@ static int hgsl_init_release_wq(struct qcom_hgsl *hgsl)
 
 	hgsl->release_wq = alloc_workqueue(
 		"hgsl-release-wq", WQ_HIGHPRI | WQ_MEM_RECLAIM, 0);
-	if (IS_ERR_OR_NULL(hgsl->release_wq)) {
+	if (!hgsl->release_wq) {
 		dev_err(hgsl->dev, "failed to create workqueue\n");
-		ret = PTR_ERR(hgsl->release_wq);
+		ret = -ENOMEM;
 		goto out;
 	}
 	INIT_WORK(&hgsl->release_work, hgsl_release_worker);
@@ -4917,7 +4917,7 @@ static int hgsl_suspend(struct device *dev)
 	struct qcom_hgsl *hgsl = platform_get_drvdata(pdev);
 
 	LOGD("+");
-	if (hgsl->events_worker)
+	if (!IS_ERR_OR_NULL(hgsl->events_worker))
 		kthread_flush_worker(hgsl->events_worker);
 	if (hgsl->wq)
 		flush_workqueue(hgsl->wq);

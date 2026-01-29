@@ -221,7 +221,7 @@ struct hgsl_drawobj_events {
 	void *priv;
 };
 
-void hgsl_drawobjs_init(void);
+int hgsl_drawobjs_init(void);
 void hgsl_drawobjs_deinit(void);
 
 void hgsl_drawobj_destroy(struct hgsl_drawobj *drawobj);

@@ -357,6 +357,7 @@ struct hgsl_context {
 	unsigned int drawq_head;
 	unsigned int drawq_tail;
 	int queued;
+	int wait_cnt;
 	wait_queue_head_t drawq_wq;
 
 	struct rt_mutex dispatch_lock;
