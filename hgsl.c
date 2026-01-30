@@ -1796,6 +1796,11 @@ static void _cleanup_shadow(struct hgsl_hab_channel_t *hab_channel,
 	}
 
 	if (ctxt->is_fe_shadow) {
+		/*
+		 * The shadow TS buffer is mapped in backend by GSL HAB server,
+		 * so now request to unmap the buffer after sending RPC call
+		 * to destroy the context.
+		 */
 		hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
 		hgsl_sharedmem_free(mem_node);
 	} else {
