@@ -426,9 +426,14 @@ static void tcsr_ring_global_db(struct qcom_hgsl *hgsl, uint32_t tcsr_idx,
 				GLB_DB_SRC_ISSUEIB_IRQ_ID_0 + dbq_idx);
 }
 
-static inline bool get_fv_status(struct qcom_hgsl *hgsl, u32 dev_id)
+bool get_fv_status(struct qcom_hgsl *hgsl, u32 dev_id)
 {
 	bool fv_status = false;
+
+	if (!hgsl) {
+		LOGE("Invalid hgsl dev");
+		goto out;
+	}
 
 	if (!hgsl->fv_on)
 		goto out;
@@ -1637,8 +1642,10 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 	u32 gpu_id = 0;
 
 	ret_val = hgsl_hyp_init(&hgsl->global_hyp, hgsl->dev, 0, "hgsl");
-	if (ret_val != 0)
+	if (ret_val != 0) {
+		LOGE("hgsl_hyp_init() failed with ret_val = %d", ret_val);
 		goto out;
+	}
 
 	/* Retry to communicate with BE here first do gsl_lib_open*/
 	do {
@@ -1646,57 +1653,59 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 	} while (ret_val == -EAGAIN && retry_count--);
 
 	if (rval) {
-		LOGE("hgsl_hyp_lib_open() failed with ret_val %d", ret_val);
+		LOGE("hgsl_hyp_lib_open() failed with ret_val %d retry_count %u",
+				ret_val, retry_count);
 		ret_val = -EINVAL;
 		hgsl_hyp_close(&hgsl->global_hyp);
 		goto out;
 	}
 
-	/* Do gsl_device_open for both GPU device handles */
-	for (dev_hnd = GSL_HANDLE_DEV0; dev_hnd <= HGSL_DEVICE_NUM; dev_hnd++) {
-		device_id = (dev_hnd == GSL_HANDLE_DEV0) ? GSL_DEVICE_0 : GSL_DEVICE_1;
-		gpu_id = hgsl_hnd2id(dev_hnd);
+	if (hgsl->fv_on) {
+		/* Do gsl_device_open for both GPU device handles */
+		for (dev_hnd = GSL_HANDLE_DEV0; dev_hnd <= HGSL_DEVICE_NUM; dev_hnd++) {
+			device_id = (dev_hnd == GSL_HANDLE_DEV0) ? GSL_DEVICE_0 : GSL_DEVICE_1;
+			gpu_id = hgsl_hnd2id(dev_hnd);
 
-		LOGD("hgsl_hyp_device_open for device id %d", device_id);
-		ret[gpu_id] = hgsl_hyp_device_open(&hgsl->global_hyp, 0,
-						device_id, &rval);
-		if (ret[gpu_id]) {
-			LOGE("hgsl_hyp_device_open() failed for %s with ret %d",
-					((dev_hnd == GSL_HANDLE_DEV0) ? "GSL_HANDLE_DEV0" :
-							"GSL_HANDLE_DEV1"), ret[gpu_id]);
-			ret_val = -EINVAL;
-			continue;
-		} else {
-			/*
-				* Device handle returned by BE should be according to
-				* passed device id for other values consider it as error.
-				*/
-			if (dev_hnd != rval) {
-				LOGE("Inval dev_handle from BE rval=%d dev_id %d",
-						rval, device_id);
-				ret_val = -EINVAL;
+			LOGD("hgsl_hyp_device_open for device id %d", device_id);
+			ret[gpu_id] = hgsl_hyp_device_open(&hgsl->global_hyp, 0,
+							device_id, &rval);
+			if (ret[gpu_id]) {
+				LOGE("hgsl_hyp_device_open() failed for %s with ret %d",
+						((dev_hnd == GSL_HANDLE_DEV0) ? "GSL_HANDLE_DEV0" :
+								"GSL_HANDLE_DEV1"), ret[gpu_id]);
 				continue;
 			} else {
-				LOGD("Dev_handle from BE %d dev_id %d",
-						rval, device_id);
-				hgsl->device_handle[gpu_id] = rval;
+				/*
+					* Device handle returned by BE should be according to
+					* passed device id for other values consider it as error.
+					*/
+				if (dev_hnd != rval) {
+					LOGE("Inval dev_handle from BE rval=%d dev_id %d",
+							rval, device_id);
+					ret[gpu_id] = -EINVAL;
+					continue;
+				} else {
+					LOGD("Dev_handle from BE %d dev_id %d",
+							rval, device_id);
+					hgsl->device_handle[gpu_id] = rval;
+				}
 			}
 		}
-	}
 
-	if (ret[GSL_HANDLE_DEV0 - 1] && ret[GSL_HANDLE_DEV1 - 1]) {
-		LOGE("Failed for both GPU device handles");
-		hgsl_close_global_hyp_and_gsl_lib(hgsl);
-		ret_val = -EINVAL;
-		goto out;
-	} else {
 		/*
 		 * Return ret_val as an error only when hgsl fails
 		 * to open both GPU device handles.
 		 */
-		ret_val = 0;
-		hgsl->global_hyp_inited = true;
+		if (ret[GSL_HANDLE_DEV0 - 1] && ret[GSL_HANDLE_DEV1 - 1]) {
+			LOGE("Failed for both GPU device handles");
+			hgsl_close_global_hyp_and_gsl_lib(hgsl);
+			ret_val = -EINVAL;
+			goto out;
+		}
 	}
+
+	if (!ret_val)
+		hgsl->global_hyp_inited = true;
 
 out:
 	return ret_val;
@@ -5196,7 +5205,6 @@ static void release_of(struct device *dev, void *data)
 
 static const struct of_device_id hgsl_component_match[] = {
 	{.compatible = "qcom,hgsl-smmu-v2"},
-	{.compatible = "qcom,smmu-hgsl-cb"},
 	{},
 };
 
@@ -5213,7 +5221,6 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	hgsl_dev->dev = &pdev->dev;
-	platform_set_drvdata(pdev, hgsl_dev);
 
 	ret = qcom_hgsl_register(pdev, hgsl_dev);
 	if (ret < 0) {
@@ -5266,6 +5273,8 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 		goto exit_dereg;
 	}
 
+	platform_set_drvdata(pdev, hgsl_dev);
+
 	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
 		// Init GMUGOS only for the opened device
 		if (hgsl_dev->device_handle[i] != 0) {
@@ -5314,7 +5323,6 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 					hgsl_dev->device_handle[i], i);
 	}
 
-
 	hgsl_dev->cache_flags.default_iocoherency = of_property_read_bool(pdev->dev.of_node,
 							"default_iocoherency");
 	hgsl_dev->cache_flags.writecombine_enable = of_property_read_bool(pdev->dev.of_node,
@@ -5353,6 +5361,9 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 	return 0;
 
 exit_dereg:
+	if (dev_get_drvdata(&pdev->dev) == hgsl_dev)
+		dev_set_drvdata(&pdev->dev, NULL);
+
 	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
 		if (hgsl_dev->device_handle[i] != 0) {
 			struct hgsl_gmugos *gmugos = &hgsl_dev->gmugos[i];
@@ -5463,17 +5474,16 @@ static int __init hgsl_init(void)
 {
 	int err;
 
-	err = hgsl_mmu_init();
-	if (err) {
-		pr_err("Failed to register hgsl mmu sub driver: %d\n", err);
-		goto exit;
-	}
+	/* Register qcom_hgsl_driver first so that it can get FV status  */
 	err = platform_driver_register(&qcom_hgsl_driver);
 	if (err) {
 		pr_err("Failed to register hgsl driver: %d\n", err);
-		hgsl_mmu_exit();
 		goto exit;
 	}
+
+	err = hgsl_mmu_init();
+	if (err)
+		pr_err("Failed to register hgsl mmu sub driver: %d\n", err);
 
 #if IS_ENABLED(CONFIG_QCOM_HGSL_TCSR_SIGNAL)
 	err = platform_driver_register(&hgsl_tcsr_driver);
