@@ -110,15 +110,14 @@ int hgsl_hsync_fence_create_fd(struct hgsl_context *context,
 		spin_lock_irqsave(&timeline->lock, flags);
 		list_del_init(&fence->child_list);
 		spin_unlock_irqrestore(&timeline->lock, flags);
+		fput(fence->sync_file->file);
 		dma_fence_put(&fence->fence);
-		goto event_fail;
+		goto err;
 	}
 
 	fd_install(fence_fd, fence->sync_file->file);
 	return fence_fd;
 
-event_fail:
-	dma_fence_put(&fence->fence);
 err:
 	put_unused_fd(fence_fd);
 	return ret;
