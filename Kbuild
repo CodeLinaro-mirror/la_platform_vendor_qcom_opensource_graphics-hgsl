@@ -29,7 +29,9 @@ qcom_hgsl-y = hgsl.o \
             hgsl_drawobj.o \
             hgsl_dispatch.o \
             hgsl_mmu.o \
-            hgsl_iommu.o
+            hgsl_iommu.o \
+            hgsl_snapshot.o \
+            hgsl_pm4_dec_4_7.o
 
 qcom_hgsl-$(CONFIG_QCOM_HGSL_TCSR_SIGNAL) += hgsl_tcsr.o
 qcom_hgsl-$(CONFIG_SYSFS) += hgsl_sysfs.o

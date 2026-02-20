@@ -1,7 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #ifndef HGSL_MEMORY_INCLUDED
@@ -11,6 +11,7 @@
 #include <linux/mutex.h>
 #include <linux/types.h>
 #include <linux/rbtree.h>
+#include <linux/iosys-map.h>
 #include "hgsl_types.h"
 #include "hgsl_utils.h"
 
@@ -86,6 +87,11 @@ struct hgsl_mem_node {
 	struct hgsl_cache_flags   cache_flags;
 	struct hgsl_mem_node_iommu_info mem_node_iommu_info;
 	char                      metainfo[HGSL_MEM_META_MAX_SIZE];
+	uint32_t                  iommu_mask;
+	uint32_t                  priv;
+	struct hgsl_pagetable     *pagetable;
+	struct hgsl_priv          *ptr_hgsl_priv;
+	struct iosys_map          kva_map;
 };
 
 int hgsl_sharedmem_alloc(struct device *dev, uint32_t sizebytes,
@@ -102,6 +108,7 @@ void *hgsl_mem_node_zalloc(struct hgsl_cache_flags cache_flags);
 
 int hgsl_mem_add_node(struct rb_root *rb_root,
 		struct hgsl_mem_node *mem_node);
+
 struct hgsl_mem_node *hgsl_mem_find_node_locked(
 		struct rb_root *rb_root, uint64_t gpuaddr,
 		uint64_t size, bool accurate);

@@ -316,6 +316,7 @@ struct qcom_hgsl {
 	struct hgsl_mem_node *ipcq_memnode[HGSL_DEVICE_NUM][HGSL_IPCQ_NUM];
 	struct iosys_map ipcq_memnode_vmap[HGSL_DEVICE_NUM][HGSL_IPCQ_NUM];
 	uint32_t irq_index;
+	bool gvm_init_done[HGSL_DEVICE_NUM];
 };
 
 /**
@@ -356,6 +357,7 @@ struct hgsl_context {
 	unsigned int drawq_head;
 	unsigned int drawq_tail;
 	int queued;
+	int wait_cnt;
 	wait_queue_head_t drawq_wq;
 
 	struct rt_mutex dispatch_lock;
