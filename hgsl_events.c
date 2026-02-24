@@ -7,6 +7,7 @@
 #include <linux/spinlock.h>
 
 #include "hgsl.h"
+#include "hgsl_dispatch.h"
 
 /**
  * enum hgsl_event_results - result codes passed to an event callback when the
@@ -169,7 +170,6 @@ int hgsl_add_event(struct hgsl_priv *hgsl_priv, struct hgsl_event_group *group,
 	u32 queued;
 	struct hgsl_context *ctxt = group->context;
 	struct hgsl_event *event;
-	u32 retired;
 
 	if (!func)
 		return -EINVAL;
@@ -184,6 +184,12 @@ int hgsl_add_event(struct hgsl_priv *hgsl_priv, struct hgsl_event_group *group,
 			&queued);
 		if (hgsl_ts32_ge(timestamp, queued) > 0)
 			return -EINVAL;
+	}
+
+	if (hgsl_ts32_ge(group->processed, timestamp)) {
+		/* Already retired, cb directly */
+		func(hgsl, group, priv, HGSL_EVENT_RETIRED);
+		return 0;
 	}
 
 	event = kmem_cache_alloc(events_cache, GFP_KERNEL);
@@ -207,14 +213,8 @@ int hgsl_add_event(struct hgsl_priv *hgsl_priv, struct hgsl_event_group *group,
 	kthread_init_work(&event->work, _hgsl_event_worker);
 
 	spin_lock(&group->lock);
-	/*
-	 * Check to see if the requested timestamp has already retired.  If so,
-	 * schedule the callback right away
-	 */
-	group->readtimestamp(group->context, GSL_TIMESTAMP_RETIRED,
-		&retired);
-
-	if (hgsl_ts32_ge(retired, timestamp)) {
+	/* Recheck under lock in case it retired while we were allocating */
+	if (hgsl_ts32_ge(group->processed, timestamp)) {
 		event->result = HGSL_EVENT_RETIRED;
 		kthread_queue_work(hgsl->events_worker, &event->work);
 		spin_unlock(&group->lock);
@@ -287,9 +287,6 @@ void hgsl_events_deinit(struct qcom_hgsl *hgsl)
 
 	hgsl_process_event_groups(hgsl);
 
-	if (!IS_ERR(events_cache))
-		kmem_cache_destroy(events_cache);
-
 	write_lock(&hgsl->event_groups_lock);
 	list_for_each_entry_safe(group, tmp, &hgsl->event_groups, node) {
 		WARN_ON(!list_empty(&group->events));
@@ -297,14 +294,21 @@ void hgsl_events_deinit(struct qcom_hgsl *hgsl)
 	}
 	write_unlock(&hgsl->event_groups_lock);
 
-	if (hgsl->events_worker) {
+	if (!IS_ERR_OR_NULL(hgsl->events_worker)) {
+		kthread_flush_worker(hgsl->events_worker);
 		kthread_destroy_worker(hgsl->events_worker);
 		hgsl->events_worker = NULL;
 	}
 
 	if (hgsl->lockless_wq) {
+		flush_workqueue(hgsl->lockless_wq);
 		destroy_workqueue(hgsl->lockless_wq);
 		hgsl->lockless_wq = NULL;
+	}
+
+	if (!IS_ERR_OR_NULL(events_cache)) {
+		kmem_cache_destroy(events_cache);
+		events_cache = NULL;
 	}
 }
 
@@ -312,6 +316,12 @@ int hgsl_events_init(struct qcom_hgsl *hgsl)
 {
 	struct kthread_worker *events_worker;
 	int ret = 0;
+
+	events_cache = KMEM_CACHE(hgsl_event, 0);
+	if (IS_ERR_OR_NULL(events_cache)) {
+		LOGE("Failed to allocate events_cache.\n");
+		return -ENOMEM;
+	}
 
 	/*
 	 * The lockless workqueue is used to perform work which doesn't need to
@@ -321,23 +331,27 @@ int hgsl_events_init(struct qcom_hgsl *hgsl)
 		WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
 	if (!hgsl->lockless_wq) {
 		ret = -ENOMEM;
-		LOGE("Failed to allocate lockless workqueue, ret %d\n", ret);
-		return ret;
+		LOGE("Failed to allocate lockless workqueue.\n");
+		goto err;
 	}
 
 	events_worker = kthread_create_worker(0, "hgsl-events");
 	if (IS_ERR_OR_NULL(events_worker)) {
-		ret = PTR_ERR(events_worker);
+		destroy_workqueue(hgsl->lockless_wq);
+		hgsl->lockless_wq = NULL;
+		ret = events_worker ? PTR_ERR(events_worker) : -ENOMEM;
 		LOGE("Failed to create events worker, ret=%d\n", ret);
-		return ret;
+		goto err;
 	}
 	sched_set_fifo(events_worker->task);
-	hgsl->events_worker = events_worker;
 
 	INIT_LIST_HEAD(&hgsl->event_groups);
 	rwlock_init(&hgsl->event_groups_lock);
+	hgsl->events_worker = events_worker;
 
-	events_cache = KMEM_CACHE(hgsl_event, 0);
-
+	return 0;
+err:
+	kmem_cache_destroy(events_cache);
+	events_cache = NULL;
 	return ret;
 }

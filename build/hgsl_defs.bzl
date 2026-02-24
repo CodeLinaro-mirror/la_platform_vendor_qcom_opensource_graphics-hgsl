@@ -19,6 +19,8 @@ def hgsl_get_srcs():
         "hgsl_dispatch.c",
         "hgsl_mmu.c",
         "hgsl_iommu.c",
+        "hgsl_snapshot.c",
+        "hgsl_pm4_dec_4_7.c",
     ]
 
     srcs = srcs + native.glob(["*.h"]) + qcom_hgsl_includes

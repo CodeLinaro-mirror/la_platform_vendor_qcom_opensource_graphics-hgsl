@@ -422,7 +422,7 @@ int hgsl_debugfs_client_init(struct hgsl_priv *priv)
 	if (IS_ERR_OR_NULL(ret)) {
 		LOGW("Create debugfs proc node failed.");
 		priv->debugfs_client = NULL;
-		return PTR_ERR(ret);
+		return ret ? PTR_ERR(ret) : -EINVAL;
 	} else
 		priv->debugfs_client = ret;
 
