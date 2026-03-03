@@ -1240,7 +1240,7 @@ static int hgsl_allocate_per_device_ipc_queues(struct qcom_hgsl *hgsl, uint32_t 
 
 	ret = hgsl_hyp_export_ipc_queue(hgsl, dev_idx);
 	if (ret) {
-		LOGI("Failed to export ipcq %d\n", ret);
+		LOGI("hgsl_hyp_export_ipc_queue() failed for device %u with ret=%d\n", dev_idx, ret);
 		goto err;
 	}
 
@@ -1288,7 +1288,7 @@ static int hgsl_allocate_ipc_queues(struct qcom_hgsl *hgsl, uint32_t dev_idx)
 
 	ret = hgsl_allocate_per_device_ipc_queues(hgsl, dev_idx);
 	if (ret) {
-		LOGI("failed to alloc ipc queues for dev %d, ret %d", dev_idx, ret);
+		LOGI("hgsl_allocate_per_device_ipc_queues() failed for device %d with ret=%d", dev_idx, ret);
 	}
 
 out:
@@ -1342,12 +1342,12 @@ static int hgsl_dbcq_issue_cmd(struct hgsl_priv  *priv,
 	msg_dwords_aligned = ALIGN(msg_dwords, 4);
 
 	// check if we need to do batch submission
-	if ((msg_dwords_aligned >= dbcq->queue_size) ||
+	if ((msg_dwords_aligned >= (dbcq->queue_size >> 1)) ||
 		(msg_dwords_aligned > (MSG_SZ_MASK >> MSG_SZ_SHIFT))) {
 		msg_dwords = MSG_ISSUE_INF_SZ();
 		msg_dwords_aligned = ALIGN(msg_dwords, 4);
 		is_batch_ibdesc = true;
-		LOGI("Number of IBs exceeded. Proceeding with CMDBATCH_IBDESC");
+		LOGI("Number of IBs exceeded %#x. Proceeding with CMDBATCH_IBDESC", num_ibs);
 	}
 
 	msg_buf_sz = msg_dwords_aligned << 2;
@@ -2410,6 +2410,8 @@ out:
 			hgsl_ctxt_destroy(priv, hab_channel, params->devhandle,
 				params->ctxthandle, NULL, false);
 		else if (ctxt && (params->ctxthandle < HGSL_CONTEXT_NUM)) {
+			/* Remove the event group from the list */
+			hgsl_del_event_group(hgsl, &ctxt->event_group);
 			if (!ctxt->is_fe_shadow)
 				_cleanup_shadow(hab_channel, ctxt);
 			hgsl_hyp_ctxt_destroy(hab_channel, ctxt->devhandle,
@@ -2418,8 +2420,10 @@ out:
 			hgsl_dbcq_close(ctxt);
 			if (ctxt->is_fe_shadow)
 				_cleanup_shadow(hab_channel, ctxt);
-			kfree(ctxt);
+
+			kfree(ctxt->timeline);
 		}
+		hgsl_free(ctxt);
 		LOGE("failed to create context");
 	}
 
@@ -3773,7 +3777,7 @@ static int hgsl_ioctl_device_open(
 
 		if (copy_to_user(USRPTR(param->ret_value), &dev_handle, sizeof(dev_handle))) {
 			LOGE("Error while copying ret_value for device handle");
-			(void)hgsl_hyp_device_close(&priv->hyp_priv, &rval, param->device_id);
+			(void)hgsl_hyp_device_close(&priv->hyp_priv, &rval, dev_handle);
 			ret = -EFAULT;
 			goto out;
 		}
@@ -3814,7 +3818,7 @@ static int hgsl_ioctl_device_open(
 												priv->pid, GSL_HANDLE_DEV0);
 				if (IS_ERR(priv->pagetable[HGSL_GPU_0])) {
 					ret = PTR_ERR(priv->pagetable[HGSL_GPU_0]);
-					(void)hgsl_hyp_device_close(&priv->hyp_priv, &rval, param->device_id);
+					(void)hgsl_hyp_device_close(&priv->hyp_priv, &rval, dev_handle);
 					LOGE("Unable to get pagetable for pid=%d", priv->pid);
 				}
 			} else
@@ -4070,9 +4074,9 @@ static int hgsl_init_release_wq(struct qcom_hgsl *hgsl)
 
 	hgsl->release_wq = alloc_workqueue(
 		"hgsl-release-wq", WQ_HIGHPRI | WQ_MEM_RECLAIM, 0);
-	if (IS_ERR_OR_NULL(hgsl->release_wq)) {
+	if (!hgsl->release_wq) {
 		dev_err(hgsl->dev, "failed to create workqueue\n");
-		ret = PTR_ERR(hgsl->release_wq);
+		ret = -ENOMEM;
 		goto out;
 	}
 	INIT_WORK(&hgsl->release_work, hgsl_release_worker);
@@ -4889,13 +4893,31 @@ exit:
 	return ret;
 }
 
+static void hgsl_close_gsl_device_lib(struct qcom_hgsl *hgsl)
+{
+	int dev_num = 0;
+	int rval = 0;
+
+	for (dev_num = 0; dev_num < HGSL_DEVICE_NUM; dev_num++) {
+		if (hgsl->device_handle[dev_num] != 0) {
+			(void)hgsl_hyp_device_close(&hgsl->global_hyp, &rval, (dev_num + GSL_HANDLE_DEV0));
+			if (rval)
+				LOGE("Error in hgsl_hyp_device_close() for device handle %d", (dev_num + GSL_HANDLE_DEV0));
+		}
+
+		hgsl->device_handle[dev_num] = 0;
+	}
+
+	hgsl_close_global_hyp_and_gsl_lib(hgsl);
+}
+
 static int hgsl_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct qcom_hgsl *hgsl = platform_get_drvdata(pdev);
 
 	LOGD("+");
-	if (hgsl->events_worker)
+	if (!IS_ERR_OR_NULL(hgsl->events_worker))
 		kthread_flush_worker(hgsl->events_worker);
 	if (hgsl->wq)
 		flush_workqueue(hgsl->wq);
@@ -5102,42 +5124,51 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 	}
 
 	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
-		/*
-		 * The "fv_on" DT property indicates full virtualization
-		 * is enabled and if its not present then do not enable FV on BE for that GVM.
-		 */
-		if (hgsl_dev->fv_on)
-			hgsl_dev->ipcq_settings[i].feature_flags |= HGSL_FEATURE_MASK_FV;
+		// Init GMUGOS only for the opened device
+		if (hgsl_dev->device_handle[i] != 0) {
+			LOGD("Allocate ipcq for device %d", i);
+			/*
+			 * The "fv_on" DT property indicates full virtualization
+			 * is enabled and if its not present then do not enable FV on BE for that GVM.
+			 */
+			if (hgsl_dev->fv_on)
+				hgsl_dev->ipcq_settings[i].feature_flags |= HGSL_FEATURE_MASK_FV;
 
-		ret = hgsl_allocate_ipc_queues(hgsl_dev, i);
-		if (ret) {
-			LOGI("error in hgsl_allocate_ipc_queues %d", ret);
-			hgsl_hyp_deinit_ipcq(hgsl_dev, i);
-			continue;
-		}
+			ret = hgsl_allocate_ipc_queues(hgsl_dev, i);
+			if (ret) {
+				LOGI("hgsl_allocate_ipc_queues() failed with ret=%d for device %d", ret, i);
+				hgsl_hyp_deinit_ipcq(hgsl_dev, i);
+				continue;
+			}
 
-		ret = hgsl_init_gmugos(pdev, hgsl_dev->device_handle[i],
-		hgsl_dev->irq_index - HGSL_DB_SIGNAL_GMU_GOS_0, RGSGOS_IRQ_MASK);
-		if (ret)
-			LOGE("hgsl_init_gmugos %d failed irq index 0x%x", i, hgsl_dev->irq_index);
+			ret = hgsl_init_gmugos(pdev, hgsl_dev->device_handle[i],
+					(hgsl_dev->irq_index - HGSL_DB_SIGNAL_GMU_GOS_0),
+					RGSGOS_IRQ_MASK);
+			if (ret)
+				LOGE("hgsl_init_gmugos() failed for dev %d irq idx 0x%x ret=%d",
+					i, hgsl_dev->irq_index, ret);
 
-		LOGD("gvm settings dev_num %d mask 0x%x, sid %d, cb %d",
-				i, hgsl_dev->gvm_settings[i].enabled_feature_mask,
-				hgsl_dev->gvm_settings[i].sid, hgsl_dev->gvm_settings[i].cb);
-		LOGD("irq_index %d, irq_bit_pkmd_hfi %d",
-				hgsl_dev->gvm_settings[i].irq_index,
-				hgsl_dev->gvm_settings[i].irq_bit_pkmd_hfi);
+			LOGD("gvm settings dev_num %d mask 0x%x, sid %d, cb %d",
+					i, hgsl_dev->gvm_settings[i].enabled_feature_mask,
+					hgsl_dev->gvm_settings[i].sid, hgsl_dev->gvm_settings[i].cb);
+			LOGD("irq_index %d, irq_bit_pkmd_hfi %d",
+					hgsl_dev->gvm_settings[i].irq_index,
+					hgsl_dev->gvm_settings[i].irq_bit_pkmd_hfi);
 
-		/*
-		 * Report a warning If FV is ON through device tree property but from backend
-		 * its disabled.
-		 */
-		if (hgsl_dev->fv_on) {
-			if (!(hgsl_dev->gvm_settings[i].enabled_feature_mask & HGSL_FEATURE_MASK_FV))
-				LOGW("GPU FV is disabled by backend for GPU %d", i);
-			else
-				LOGI("GPU FV is enabled by backend for GPU %d", i);
-		}
+			/*
+			 * Report a warning If FV is ON through device tree property
+			 * but from backend its disabled.
+			 */
+			if (hgsl_dev->fv_on) {
+				if (!(hgsl_dev->gvm_settings[i].enabled_feature_mask &
+						HGSL_FEATURE_MASK_FV))
+					LOGW("GPU FV is disabled by backend for GPU %d", i);
+				else
+					LOGI("GPU FV is enabled by backend for GPU %d", i);
+			}
+		} else
+			LOGI("Invalid devhandle %d for device %d so skip allocating IPCQ",
+					hgsl_dev->device_handle[i], i);
 	}
 
 
@@ -5180,14 +5211,18 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 
 exit_dereg:
 	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
-		struct hgsl_gmugos *gmugos = &hgsl_dev->gmugos[i];
+		if (hgsl_dev->device_handle[i] != 0) {
+			struct hgsl_gmugos *gmugos = &hgsl_dev->gmugos[i];
 
-		hgsl_hyp_deinit_ipcq(hgsl_dev, i);
-		for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++) {
-			hgsl_gmugos_irq_free(&gmugos->irq[j]);
-			gmugos->activated_irq[i][j] = 0;
+			hgsl_hyp_deinit_ipcq(hgsl_dev, i);
+			for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++) {
+				hgsl_gmugos_irq_free(&gmugos->irq[j]);
+				gmugos->activated_irq[i][j] = 0;
+			}
 		}
 	}
+
+	hgsl_close_gsl_device_lib(hgsl_dev);
 	qcom_hgsl_deregister(pdev);
 	return ret;
 }
@@ -5198,7 +5233,6 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 	struct hgsl_tcsr *tcsr_sender, *tcsr_receiver;
 	struct hgsl_gmugos *gmugos;
 	int i, j;
-	int rval;
 
 	hgsl_dispatch_deinit(hgsl);
 
@@ -5222,11 +5256,13 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 
 	mutex_lock(&hgsl->mutex);
 	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
-		hgsl_hyp_deinit_ipcq(hgsl, i);
-		gmugos = &hgsl->gmugos[i];
-		for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++) {
-			hgsl_gmugos_irq_free(&gmugos->irq[j]);
-			gmugos->activated_irq[i][j] = 0;
+		if (hgsl->device_handle[i] != 0) {
+			hgsl_hyp_deinit_ipcq(hgsl, i);
+			gmugos = &hgsl->gmugos[i];
+			for (j = 0; j < HGSL_GMUGOS_IRQ_NUM; j++) {
+				hgsl_gmugos_irq_free(&gmugos->irq[j]);
+				gmugos->activated_irq[i][j] = 0;
+			}
 		}
 	}
 	mutex_unlock(&hgsl->mutex);
@@ -5243,21 +5279,11 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 		if (hgsl->dbq[i].state == DB_STATE_Q_INIT_DONE)
 			hgsl_reset_dbq(&hgsl->dbq[i]);
 
-	component_master_del(&pdev->dev, &hgsl_component_ops);
+	if (hgsl->fv_on)
+		component_master_del(&pdev->dev, &hgsl_component_ops);
 
-	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
-		(void)hgsl_hyp_device_close(&hgsl->global_hyp, &rval, (i + GSL_DEVICE_0));
-		if (rval)
-			LOGE("Error in hgsl_hyp_device_close() for device handle %d", (i + GSL_HANDLE_DEV0));
+	hgsl_close_gsl_device_lib(hgsl);
 
-		hgsl->device_handle[i] = GSL_HANDLE_NULL;
-	}
-
-	(void)hgsl_hyp_lib_close(&hgsl->global_hyp, 0, &rval);
-	if (rval)
-		LOGW("hgsl_hyp_lib_close() failed");
-
-	hgsl->global_hyp_inited = false;
 	idr_destroy(&hgsl->isync_timeline_idr);
 
 	mutex_destroy(&hgsl->mutex);

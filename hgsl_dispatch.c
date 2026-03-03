@@ -98,14 +98,16 @@ static int _retire_syncobj(struct qcom_hgsl *hgsl,
 
 	/*
 	 * If we got here, there are pending events for sync object.
-	 * Start the canary timer if it hasnt been started already.
+	 * Start the canary timer if it hasn't been started already.
+	 * The syncobj remains in the queue and will be checked again
+	 * when events complete.
 	 */
 	if (!syncobj->timeout_jiffies) {
 		syncobj->timeout_jiffies = jiffies + msecs_to_jiffies(5000);
 			mod_timer(&syncobj->timer, syncobj->timeout_jiffies);
 	}
 
-	return -EAGAIN;
+	return 1;
 }
 
 static bool _marker_expired(struct hgsl_drawobj_cmd *markerobj)
@@ -120,8 +122,8 @@ static bool _marker_expired(struct hgsl_drawobj_cmd *markerobj)
 	if (!hgsl_context_get(drawobj->context))
 		return true;
 
-	expired = hgsl_check_timestamp(drawobj->priv, drawobj->context,
-		markerobj->marker_timestamp);
+	expired = hgsl_ts32_ge(drawobj->context->event_group.processed,
+			markerobj->marker_timestamp);
 
 	hgsl_put_context(drawobj->context);
 
@@ -171,7 +173,7 @@ static int _retire_markerobj(struct qcom_hgsl *hgsl,
 	 * until the dependent timestamp expires
 	 */
 
-	return test_bit(CMDOBJ_SKIP, &cmdobj->priv) ? 1 : -EAGAIN;
+	return test_bit(CMDOBJ_SKIP, &cmdobj->priv) ? 1 : 0;
 }
 
 static int _retire_timelineobj(struct hgsl_drawobj *drawobj,
@@ -257,6 +259,8 @@ static struct hgsl_drawobj *_process_drawqueue_get_next_drawobj(
 			return drawobj;
 		case SYNCOBJ_TYPE:
 			ret = _retire_syncobj(hgsl, SYNCOBJ(drawobj), ctxt);
+			if (ret == 1)
+				return NULL;
 			break;
 		case MARKEROBJ_TYPE:
 			ret = _retire_markerobj(hgsl, CMDOBJ(drawobj), ctxt);
@@ -347,7 +351,7 @@ static int hgsl_dispatch_sendcmds(struct qcom_hgsl *hgsl,
 	 * Wake up any snoozing threads if we have consumed any real commands
 	 * or marker commands and we have room in the context queue.
 	 */
-	if (_check_context_queue(ctxt, 0))
+	if (ctxt->wait_cnt > 0 && _check_context_queue(ctxt, 1))
 		wake_up_all(&ctxt->drawq_wq);
 
 	if (!ret)
@@ -370,13 +374,19 @@ static int _check_for_room_in_context_drawq(
 	 */
 	if ((ctxt->queued + count) > (_context_drawqueue_size - 1)) {
 		trace_ctxt_sleep(ctxt);
+		ctxt->wait_cnt++;
 		spin_unlock(&ctxt->drawq_lock);
 
-		ret = wait_event_interruptible_timeout(ctxt->drawq_wq,
+		if (wait_event_interruptible_timeout(ctxt->drawq_wq,
 			_check_context_queue(ctxt, count),
-			msecs_to_jiffies(_context_queue_wait));
+			msecs_to_jiffies(_context_queue_wait)) <= 0) {
+			/* No room in drawqueue, drop it, let user decide.*/
+			LOGW("No room in queue for context: %u", ctxt->context_id);
+			ret = -EAGAIN;
+		}
 
 		spin_lock(&ctxt->drawq_lock);
+		ctxt->wait_cnt--;
 		trace_ctxt_wake(ctxt);
 	}
 
@@ -466,8 +476,9 @@ static int _queue_markerobj(struct hgsl_context *ctxt,
 		 * See if we can fastpath this thing - if nothing is queued
 		 * and nothing is inflight retire without bothering the GPU
 		 */
-		if (!ctxt->queued && hgsl_check_timestamp(drawobj->priv,
-				drawobj->context, ctxt->queued_ts)) {
+		if (!ctxt->queued &&
+			hgsl_ts32_ge(ctxt->event_group.processed,
+				ctxt->queued_ts)) {
 			ctxt->queued_ts = drawobj->timestamp;
 			_retire_timestamp(drawobj);
 			return 1;
@@ -515,7 +526,7 @@ static void _retire_drawobjs(struct hgsl_context *ctxt)
 			node) {
 		struct hgsl_drawobj *drawobj = obj->drawobj;
 
-		if (!hgsl_check_timestamp(drawobj->priv, drawobj->context,
+		if (!hgsl_ts32_ge(ctxt->event_group.processed,
 				drawobj->timestamp))
 			continue;
 
@@ -531,6 +542,7 @@ void hgsl_reclaim_drawobjs(struct hgsl_context *ctxt)
 
 	rt_mutex_lock(&dispatch->mutex);
 	while (unlikely(!list_empty(&dispatch->drawobj_list))) {
+		hgsl_process_event_group(dispatch->hgsl, &ctxt->event_group);
 		_retire_drawobjs(ctxt);
 		rt_mutex_unlock(&dispatch->mutex);
 		usleep_range(100, 1000);
@@ -564,22 +576,24 @@ void hgsl_dispatch_ctxt_issuecmds(
 		ret = hgsl_dispatch_sendcmds(hgsl, ctxt);
 
 		/*
-		 * If the context had nothing queued or the context has been
-		 * destroyed then drop the job
-		 */
-		if (!ret || ret == -ENOENT) {
-			hgsl_put_context(ctxt);
-			continue;
-		}
-
-		/*
 		 * If the dispatch queue is full then requeue the job.
 		 * Otherwise the context either successfully submmitted
 		 * to the GPU or another error happened and it should
 		 * re-scheduled.
 		 */
-		atomic_inc(&dispatch->count);
-		hgsl_dispatch_ctxt_schedule(ctxt);
+		if (ret == -EINTR || ret == -EAGAIN) {
+			atomic_inc(&dispatch->count);
+			hgsl_dispatch_ctxt_schedule(ctxt);
+			continue;
+		}
+
+		/*
+		 * If the context had nothing queued or a unexpected error
+		 * occurs then drop the job
+		 */
+		if (ret < 0)
+			LOGE("sendcmds failed=%d", ret);
+		hgsl_put_context(ctxt);
 	}
 }
 
@@ -588,12 +602,9 @@ static void hgsl_dispatch_ctxt_work(struct kthread_work *work)
 	struct hgsl_dispatch_context *dispatch =
 			container_of(work, struct hgsl_dispatch_context, work);
 	struct hgsl_context *ctxt = dispatch->ctxt;
-	struct qcom_hgsl *hgsl = dispatch->hgsl;
-
 	rt_mutex_lock(&dispatch->mutex);
 
 	_retire_drawobjs(ctxt);
-	hgsl_process_event_group(hgsl, &ctxt->event_group);
 	hgsl_dispatch_ctxt_issuecmds(ctxt);
 
 	rt_mutex_unlock(&dispatch->mutex);
@@ -603,7 +614,7 @@ int hgsl_dispatch_queue_context(struct hgsl_context *ctxt)
 {
 	struct hgsl_dispatch_context *dispatch = ctxt->dispatch;
 
-	if (!hgsl_context_get(ctxt))
+	if (!dispatch || !hgsl_context_get(ctxt))
 		return 0;
 
 	trace_dispatch_queue_context(ctxt);
@@ -772,22 +783,40 @@ void hgsl_dispatch_deinit(struct qcom_hgsl *hgsl)
 	hgsl_events_deinit(hgsl);
 	hgsl_drawobjs_deinit();
 
-	if (!IS_ERR(obj_cache))
+	if (!IS_ERR_OR_NULL(obj_cache)) {
 		kmem_cache_destroy(obj_cache);
+		obj_cache = NULL;
+	}
 }
 
 int hgsl_dispatch_init(struct qcom_hgsl *hgsl)
 {
-	/* Set up the GPU events for the device */
-	int ret = hgsl_events_init(hgsl);
+	int ret;
 
-	if (ret) {
-		LOGE("events init failed, ret %d\n", ret);
-		return ret;
+	obj_cache = KMEM_CACHE(cmd_obj, 0);
+	if (IS_ERR_OR_NULL(obj_cache)) {
+		LOGE("Failed to allocate obj_cache.\n");
+		obj_cache = NULL;
+		return -ENOMEM;
 	}
 
-	hgsl_drawobjs_init();
-	obj_cache = KMEM_CACHE(cmd_obj, 0);
+	ret = hgsl_drawobjs_init();
+	if (ret) {
+		LOGE("drawobjs init failed, ret %d\n", ret);
+		goto err;
+	}
+
+	/* Set up the GPU events for the device */
+	ret = hgsl_events_init(hgsl);
+	if (ret) {
+		LOGE("events init failed, ret %d\n", ret);
+		hgsl_drawobjs_deinit();
+		goto err;
+	}
 
 	return 0;
+err:
+	kmem_cache_destroy(obj_cache);
+	obj_cache = NULL;
+	return ret;
 }
