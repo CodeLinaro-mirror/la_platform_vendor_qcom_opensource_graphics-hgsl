@@ -355,7 +355,7 @@ struct hgsl_context {
 	uint32_t db_signal;
 
 	/* Dispatcher */
-	spinlock_t drawq_lock;
+	struct rt_mutex drawq_lock;
 	struct hgsl_drawobj *drawq[CONTEXT_DRAWQUEUE_SIZE];
 	unsigned int drawq_head;
 	unsigned int drawq_tail;

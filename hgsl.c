@@ -1831,7 +1831,7 @@ static inline void _destroy_context(struct kref *kref)
 	/* ensure update dbq metadata is done */
 	dma_wmb();
 
-	ctxt->destroyed = true;
+	WRITE_ONCE(ctxt->destroyed, true);
 }
 
 struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
@@ -1848,8 +1848,8 @@ struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
 	if (context_id < HGSL_CONTEXT_NUM) {
 		read_lock(&hgsl->ctxt_lock);
 		ctxt = hgsl->contexts[dev_id][context_id];
-		if (ctxt)
-			kref_get(&ctxt->kref);
+		if (ctxt && !kref_get_unless_zero(&ctxt->kref))
+			ctxt = NULL;
 		read_unlock(&hgsl->ctxt_lock);
 	}
 
@@ -2238,7 +2238,7 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	}
 
 	/* unblock all waiting threads on this context */
-	ctxt->in_destroy = true;
+	WRITE_ONCE(ctxt->in_destroy, true);
 
 	/* Make sure all pending events are processed or cancelled */
 	hgsl_ctxt_detach_drawobjs(hgsl, ctxt);
@@ -2246,7 +2246,7 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	wake_up_all(&ctxt->wait_q);
 	hgsl_put_context(ctxt);
 
-	while (!ctxt->destroyed)
+	while (!READ_ONCE(ctxt->destroyed))
 		cpu_relax();
 
 	mutex_lock(&hgsl->destroying_ctx_list_lock);
@@ -2379,7 +2379,7 @@ static int hgsl_ioctl_ctxt_create(
 	init_waitqueue_head(&ctxt->wait_q);
 	mutex_init(&ctxt->lock);
 
-	spin_lock_init(&ctxt->drawq_lock);
+	rt_mutex_init(&ctxt->drawq_lock);
 	init_waitqueue_head(&ctxt->drawq_wq);
 	rt_mutex_init(&ctxt->dispatch_lock);
 	hgsl_add_event_group(hgsl, &ctxt->event_group, ctxt, hgsl_read_timestamp,
@@ -2494,7 +2494,7 @@ static int hgsl_wait_timestamp(struct qcom_hgsl *hgsl,
 
 	ret = wait_event_interruptible_timeout(ctxt->wait_q,
 				_timestamp_retired(ctxt, timestamp) ||
-						ctxt->in_destroy,
+						READ_ONCE(ctxt->in_destroy),
 				msecs_to_jiffies(param->timeout));
 	if (ret == 0)
 		ret = -ETIMEDOUT;
@@ -3445,8 +3445,6 @@ int hgsl_read_timestamp(struct hgsl_context *ctxt,
 		return -ENOENT;
 
 	ret = get_context_shadow_ts(ctxt, type, timestamp);
-	hgsl_put_context(ctxt);
-
 	if (ret) {
 		param.devhandle = ctxt->devhandle;
 		param.ctxthandle = ctxt->context_id;
@@ -3454,6 +3452,7 @@ int hgsl_read_timestamp(struct hgsl_context *ctxt,
 		ret = hgsl_hyp_read_timestamp(&ctxt->priv->hyp_priv, &param);
 		*timestamp = param.timestamp;
 	}
+	hgsl_put_context(ctxt);
 
 	return ret;
 }

@@ -260,11 +260,17 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 	if (WARN_ON(!hgsl_context_get(ctxt)))
 		return;
 
+	/* Early return if no dispatch context */
+	if (!ctxt->dispatch) {
+		hgsl_put_context(ctxt);
+		return;
+	}
+
 	wake_up_all(&ctxt->drawq_wq);
 	trace_ctxt_detach_drawobjs(ctxt);
 
 	hgsl_flush_event_group(hgsl, &ctxt->event_group);
-	spin_lock(&ctxt->drawq_lock);
+	rt_mutex_lock(&ctxt->drawq_lock);
 	while (ctxt->drawq_head != ctxt->drawq_tail) {
 		struct hgsl_drawobj *drawobj =
 			ctxt->drawq[ctxt->drawq_head];
@@ -274,7 +280,7 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 
 		list[count++] = drawobj;
 	}
-	spin_unlock(&ctxt->drawq_lock);
+	rt_mutex_unlock(&ctxt->drawq_lock);
 
 	for (i = 0; i < count; i++) {
 		hgsl_cancel_events_timestamp(hgsl, &ctxt->event_group,
@@ -282,11 +288,9 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 		hgsl_drawobj_destroy(list[i]);
 	}
 
-	if (ctxt->dispatch) {
-		hgsl_dispatch_ctxt_schedule(ctxt);
-		kthread_flush_worker(ctxt->dispatch->worker);
-		hgsl_reclaim_drawobjs(ctxt);
-	}
+	hgsl_dispatch_queue_context(ctxt);
+	kthread_flush_worker(ctxt->dispatch->worker);
+	hgsl_reclaim_drawobjs(ctxt);
 	hgsl_put_context(ctxt);
 }
 
@@ -294,6 +298,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 {
 	struct hgsl_drawobj_sync *syncobj = SYNCOBJ(drawobj);
 	unsigned int i;
+	bool cancelled = false;
 
 	/* Zap the canary timer */
 	del_timer_sync(&syncobj->timer);
@@ -302,7 +307,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 	 * Clear all pending events - this will render any subsequent async
 	 * callbacks harmless
 	 */
-	for (i = 0; i < syncobj->numsyncs; i++) {
+	for (i = 0; i < syncobj->numsyncs && i < HGSL_MAX_SYNCPOINTS; i++) {
 		struct hgsl_drawobj_sync_event *event = &syncobj->synclist[i];
 
 		/*
@@ -313,6 +318,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 		if (!test_and_clear_bit(i, &syncobj->pending))
 			continue;
 
+		cancelled = true;
 		switch (event->type) {
 		case HGSL_CMD_SYNCPOINT_TYPE_TIMESTAMP:
 			hgsl_cancel_event(drawobj->priv->dev,
@@ -340,7 +346,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 	 * If we cancelled an event, there's a good chance that the context is
 	 * on a dispatcher queue, so schedule to get it removed.
 	 */
-	if (!bitmap_empty(&syncobj->pending, HGSL_MAX_SYNCPOINTS))
+	if (cancelled)
 		hgsl_dispatch_queue_context(drawobj->context);
 }
 
