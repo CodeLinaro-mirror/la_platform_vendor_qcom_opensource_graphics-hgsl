@@ -18,8 +18,8 @@ struct hgsl_dispatch_context {
 	/** @mutex: Mutex needed to run dispatcher function */
 	struct rt_mutex mutex;
 
-	/** @count - The count of dispatch jobs */
-	atomic_t count;
+	/** @pending: Flag indicating a dispatch work item is scheduled (0 = idle, 1 = pending) */
+	atomic_t pending;
 	/** @drawobj_list: List of objects submitted to dispatch queues */
 	struct list_head drawobj_list;
 	/** @scheduler_worker: kthread worker for scheduling gpu commands */

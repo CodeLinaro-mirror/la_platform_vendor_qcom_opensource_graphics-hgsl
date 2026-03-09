@@ -43,7 +43,7 @@ static void _ctxt_info_show(struct seq_file *s, struct hgsl_context *ctxt)
 	seq_printf(s, "ID=%3u: {\n", ctxt->context_id);
 	seq_printf(s,
 		"    pid=%d, devhandle=%u, is_fe_shadow=%u, in_destroy=%u, ",
-		ctxt->pid, ctxt->devhandle, ctxt->is_fe_shadow, ctxt->in_destroy);
+		ctxt->pid, ctxt->devhandle, ctxt->is_fe_shadow, READ_ONCE(ctxt->in_destroy));
 	seq_printf(s,
 		"dbq_info=0x%x, flags=0x%x, tcsr_idx=%d, db_signal=%u;\n",
 		ctxt->dbq_info, ctxt->flags, ctxt->tcsr_idx, ctxt->db_signal);
@@ -480,24 +480,39 @@ static void events_debugfs_print_group(struct seq_file *s,
 		struct hgsl_event_group *group)
 {
 	struct hgsl_event *event;
+	struct hgsl_context *ctxt = container_of(group,
+		struct hgsl_context, event_group);
 	u32 retired;
 
-	spin_lock(&group->lock);
+	if (WARN_ON(!hgsl_context_get(ctxt)))
+		return;
 
+	/* Sanity check if the group is inintalized */
+	if (WARN_ON(ctxt != group->context)) {
+		hgsl_put_context(ctxt);
+		return;
+	}
+
+	/*
+	 * Read the retired timestamp before taking the spinlock.
+	 * group->readtimestamp is hgsl_read_timestamp(), which may fall
+	 * back to a hyp IPC call that can sleep, so it must not be
+	 * called while holding the spinlock.
+	 */
+	if (group->readtimestamp(ctxt, GSL_TIMESTAMP_RETIRED, &retired))
+		retired = group->processed;
+
+	spin_lock(&group->lock);
 	seq_printf(s, "%s: last=%d\n", group->name,
 		group->processed);
-
 	list_for_each_entry(event, &group->events, node) {
-
-		group->readtimestamp(group->context,
-			GSL_TIMESTAMP_RETIRED, &retired);
-
 		seq_printf(s, "\t%u:%u age=%lums func=%ps [retired=%u]\n",
-			group->context->context_id, event->timestamp,
+			ctxt->context_id, event->timestamp,
 			jiffies_to_msecs(get_jiffies_64() - event->created),
 			event->func, retired);
 	}
 	spin_unlock(&group->lock);
+	hgsl_put_context(ctxt);
 }
 
 static int events_show(struct seq_file *s, void *unused)
