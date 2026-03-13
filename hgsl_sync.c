@@ -49,6 +49,7 @@ static void _hsync_fence_event_cb(struct qcom_hgsl *hgsl,
 
 	hgsl_hsync_timeline_signal(ev->context->timeline,
 		ev->timestamp);
+	hgsl_dispatch_queue_context(ev->context);
 	hgsl_put_context(ev->context);
 	kfree(ev);
 }
@@ -89,8 +90,10 @@ static int _add_fence_event(struct hgsl_context *ctxt,
 int hgsl_hsync_fence_create_fd(struct hgsl_context *context,
 				uint32_t ts)
 {
+	unsigned long flags;
 	int ret, fence_fd;
 	struct hgsl_hsync_fence *fence;
+	struct hgsl_hsync_timeline *timeline = context->timeline;
 
 	fence_fd = get_unused_fd_flags(0);
 	if (fence_fd < 0)
@@ -103,8 +106,14 @@ int hgsl_hsync_fence_create_fd(struct hgsl_context *context,
 	}
 
 	ret = _add_fence_event(context, ts);
-	if (ret)
+	if (unlikely(ret)) {
+		spin_lock_irqsave(&timeline->lock, flags);
+		list_del_init(&fence->child_list);
+		spin_unlock_irqrestore(&timeline->lock, flags);
+		fput(fence->sync_file->file);
+		dma_fence_put(&fence->fence);
 		goto err;
+	}
 
 	fd_install(fence_fd, fence->sync_file->file);
 	return fence_fd;
@@ -122,7 +131,6 @@ struct hgsl_hsync_fence *hgsl_hsync_fence_create(
 	struct hgsl_hsync_timeline *timeline = context->timeline;
 	struct hgsl_hsync_fence *fence;
 
-
 	if (!timeline || !kref_get_unless_zero(&timeline->kref))
 		return NULL;
 
@@ -138,18 +146,18 @@ struct hgsl_hsync_fence *hgsl_hsync_fence_create(
 			&timeline->lock, timeline->fence_context, ts);
 
 	fence->sync_file = sync_file_create(&fence->fence);
-	if (fence->sync_file == NULL) {
-		hgsl_hsync_timeline_put(timeline);
+	if (!fence->sync_file) {
+		dma_fence_put(&fence->fence);
 		return NULL;
 	}
 
 	fence->timeline = timeline;
 	INIT_LIST_HEAD(&fence->child_list);
 	spin_lock_irqsave(&timeline->lock, flags);
-	if (!dma_fence_is_signaled_locked(&fence->fence))
-		list_add_tail(&fence->child_list, &timeline->fence_list);
+	list_add_tail(&fence->child_list, &timeline->fence_list);
 	spin_unlock_irqrestore(&timeline->lock, flags);
 
+	trace_hsync_fence_create(fence);
 	return fence;
 }
 
@@ -172,8 +180,10 @@ static void hgsl_hsync_timeline_signal(
 	timeline->last_ts = ts;
 	list_for_each_entry_safe(cur, next, &timeline->fence_list,
 					child_list) {
-		if (dma_fence_is_signaled_locked(&cur->fence))
+		if (dma_fence_is_signaled_locked(&cur->fence)) {
 			list_move_tail(&cur->child_list, &flist);
+			trace_hsync_fence_signal(cur);
+		}
 	}
 	spin_unlock_irqrestore(&timeline->lock, flags);
 
@@ -193,8 +203,9 @@ int hgsl_hsync_timeline_create(struct hgsl_context *context)
 		return -ENOMEM;
 
 	snprintf(timeline->name, HGSL_TIMELINE_NAME_LEN,
-		"timeline_%s_%d",
-		current->comm, current->pid);
+		"timeline_%s_%d_%u_%u",
+		current->comm, current->pid,
+		context->devhandle, context->context_id);
 
 	kref_init(&timeline->kref);
 	timeline->fence_context = dma_fence_context_alloc(1);
@@ -240,12 +251,14 @@ void hgsl_hsync_timeline_fini(struct hgsl_context *context)
 		spin_lock_irqsave(&timeline->lock, flags);
 	}
 	list_for_each_entry(fence, &timeline->fence_list, child_list)
-		if (max_ts < fence->ts)
+		if (!hgsl_ts32_ge(max_ts, fence->ts))
 			max_ts = fence->ts;
 	spin_unlock_irqrestore(&timeline->lock, flags);
 
-	hgsl_hsync_timeline_signal(timeline, max_ts);
-	context->last_ts = max_ts;
+	if (max_ts) {
+		hgsl_hsync_timeline_signal(timeline, max_ts);
+		context->last_ts = max_ts;
+	}
 
 	hgsl_hsync_timeline_put(timeline);
 }
@@ -285,10 +298,12 @@ static void hgsl_hsync_fence_release(struct dma_fence *base)
 	struct hgsl_hsync_timeline *timeline = fence->timeline;
 
 	if (timeline) {
-		WARN_ON(unlikely(!base->ops->signaled(base)));
+		if (WARN_ON(unlikely(!dma_fence_is_signaled(base))))
+			trace_hsync_fence_release_unsignal(fence);
 		hgsl_hsync_timeline_put(timeline);
 	}
 
+	trace_hsync_fence_release(fence);
 	dma_fence_free(base);
 }
 
@@ -913,8 +928,8 @@ static const struct dma_fence_ops hgsl_isync_fence_ops = {
 void hgsl_get_fence_name(struct dma_fence *f,
 	char *name, u32 max_size)
 {
-	int len = scnprintf(name, max_size, "%s %s",
-			f->ops->get_driver_name(f),
+	int len = scnprintf(name, max_size, "%p %s %s",
+			f, f->ops->get_driver_name(f),
 			f->ops->get_timeline_name(f));
 
 	if (f->ops->fence_value_str) {
