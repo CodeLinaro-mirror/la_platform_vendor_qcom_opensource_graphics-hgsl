@@ -2998,7 +2998,7 @@ static int hgsl_ioctl_mem_map_smmu(
 out:
 	if (ret) {
 		if (use_fv && (!(params->flags & GSL_MEMFLAGS_PROTECTED)) &&
-							(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+			(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
 			hgsl_mmu_unmap(hgsl, pt, mem_node, false, priv->active_devicehandle);
 			hgsl_mmu_put_gpuaddr(pt, mem_node, hgsl->use_single_pt);
 		} else
@@ -4083,7 +4083,9 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 	pt = hgsl_get_ctxt_pagetable(priv);
 	while (next) {
 		node_found = rb_entry(next, struct hgsl_mem_node, mem_rb_node);
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE) {
 			ret = hgsl_mmu_unmap(hgsl, pt, node_found, false,
 							priv->active_devicehandle);
 		} else {
@@ -4095,7 +4097,9 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 				node_found->export_id, node_found->memdesc.gpuaddr, ret);
 
 		// For full virtualization release GPU address back if FE unmapping is successful.
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)
 			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
 		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
 
@@ -4107,7 +4111,9 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 	next = rb_first(&priv->mem_allocated);
 	while (next) {
 		node_found = rb_entry(next, struct hgsl_mem_node, mem_rb_node);
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE) {
 			// Single pagetable TTBR0 will be used for both the GPU SMMU context banks
 			ret = hgsl_mmu_unmap(hgsl, pt, node_found, true, priv->active_devicehandle);
 		} else
@@ -4118,7 +4124,9 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 							node_found->export_id, node_found->memdesc.gpuaddr, ret);
 
 		// For full virtualization release GPU address back if FE unmapping is successful.
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
 			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
 		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
 
