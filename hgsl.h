@@ -60,6 +60,8 @@
 #define HGSL_IPCQ_RGS_IDX (0)
 #define HGSL_IPCQ_GMU_IDX (1)
 
+#define HGSL_PROCESS_NAME_MAX_LEN (128)
+
 #define USRPTR(a) u64_to_user_ptr((uint64_t)(a))
 
 #define HGSL_MAX_IOC_SIZE (128)
