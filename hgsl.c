@@ -1618,8 +1618,6 @@ static void hgsl_close_global_hyp_and_gsl_lib(struct qcom_hgsl *hgsl)
 
 	if (hgsl->global_hyp_inited) {
 		(void)hgsl_hyp_lib_close(&hgsl->global_hyp, 0, &rval);
-		if (rval)
-			LOGW("hgsl_hyp_lib_close() failed");
 		hgsl->global_hyp_inited = false;
 	}
 
@@ -1645,10 +1643,10 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 		ret_val = hgsl_hyp_lib_open(&hgsl->global_hyp, 0, &rval);
 	} while (ret_val == -EAGAIN && retry_count--);
 
-	if (rval) {
-		LOGE("hgsl_hyp_lib_open() failed with ret_val %d", ret_val);
+	if (ret_val || rval) {
+		LOGE("hgsl_hyp_lib_open() failed with ret_val %d rval %d retry_count %u",
+				ret_val, rval, retry_count);
 		ret_val = -EINVAL;
-		hgsl_hyp_close(&hgsl->global_hyp);
 		goto out;
 	}
 
@@ -1684,19 +1682,18 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 		}
 	}
 
+	/*
+		* Return ret_val as an error only when hgsl fails
+		* to open both GPU device handles.
+		*/
 	if (ret[GSL_HANDLE_DEV0 - 1] && ret[GSL_HANDLE_DEV1 - 1]) {
 		LOGE("Failed for both GPU device handles");
-		hgsl_close_global_hyp_and_gsl_lib(hgsl);
 		ret_val = -EINVAL;
 		goto out;
-	} else {
-		/*
-		 * Return ret_val as an error only when hgsl fails
-		 * to open both GPU device handles.
-		 */
-		ret_val = 0;
-		hgsl->global_hyp_inited = true;
 	}
+
+	if (!ret_val)
+		hgsl->global_hyp_inited = true;
 
 out:
 	return ret_val;
@@ -5089,6 +5086,7 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	platform_set_drvdata(pdev, hgsl_dev);
 	ret = hgsl_init_context(hgsl_dev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "hgsl_init_context failed, ret %d\n",
@@ -5234,6 +5232,8 @@ exit_dereg:
 
 	hgsl_close_gsl_device_lib(hgsl_dev);
 	qcom_hgsl_deregister(pdev);
+	if (dev_get_drvdata(&pdev->dev) == hgsl_dev)
+		dev_set_drvdata(&pdev->dev, NULL);
 	return ret;
 }
 
@@ -5243,6 +5243,9 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 	struct hgsl_tcsr *tcsr_sender, *tcsr_receiver;
 	struct hgsl_gmugos *gmugos;
 	int i, j;
+
+	if (!hgsl)
+		goto out;
 
 	hgsl_dispatch_deinit(hgsl);
 
@@ -5298,6 +5301,8 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 
 	mutex_destroy(&hgsl->mutex);
 	qcom_hgsl_deregister(pdev);
+
+out:
 	return 0;
 }
 
