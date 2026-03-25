@@ -200,7 +200,7 @@ struct hgsl_event {
 	hgsl_event_func func;
 	void *priv;
 	struct list_head node;
-	u32 created;
+	u64 created;
 	struct kthread_work work;
 	int result;
 	struct hgsl_event_group *group;
@@ -307,6 +307,9 @@ struct qcom_hgsl {
 	struct dentry *debugfs;
 	struct dentry *clients_debugfs;
 	struct dentry *debugfs_stat;
+	struct mutex destroying_ctx_list_lock;
+	struct list_head destroying_ctx_list;
+
 	/* HFI message queues */
 	void *PKMD2HGSL_queue[HGSL_DEVICE_NUM];
 	void *GMU2HGSL_queue[HGSL_DEVICE_NUM];
@@ -316,6 +319,7 @@ struct qcom_hgsl {
 	struct hgsl_mem_node *ipcq_memnode[HGSL_DEVICE_NUM][HGSL_IPCQ_NUM];
 	struct iosys_map ipcq_memnode_vmap[HGSL_DEVICE_NUM][HGSL_IPCQ_NUM];
 	uint32_t irq_index;
+	bool gvm_init_done[HGSL_DEVICE_NUM];
 };
 
 /**
@@ -356,6 +360,7 @@ struct hgsl_context {
 	unsigned int drawq_head;
 	unsigned int drawq_tail;
 	int queued;
+	int wait_cnt;
 	wait_queue_head_t drawq_wq;
 
 	struct rt_mutex dispatch_lock;
@@ -363,6 +368,7 @@ struct hgsl_context {
 	struct hgsl_event_group event_group;
 
 	struct hgsl_mem_node *ctxt_record_mem_node;
+	struct list_head node;
 };
 
 struct hgsl_priv {
@@ -716,4 +722,5 @@ struct hgsl_sync_fence_cb *hgsl_sync_fence_async_wait(int fd, bool (*func)(void 
 void hgsl_sync_fence_async_cancel(struct hgsl_sync_fence_cb *kcb);
 
 void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta);
+bool get_fv_status(struct qcom_hgsl *hgsl, u32 dev_id);
 #endif /* __HGSL_H_ */

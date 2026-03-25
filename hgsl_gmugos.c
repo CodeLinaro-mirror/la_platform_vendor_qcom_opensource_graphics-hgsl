@@ -10,6 +10,7 @@
 #include <linux/platform_device.h>
 
 #include "hgsl.h"
+#include "hgsl_snapshot.h"
 
 #define GMUGOS_REG_SET    (0x0)
 #define GMUGOS_REG_STATUS (0x4)
@@ -35,6 +36,92 @@ static irqreturn_t hgsl_gmugos_ts_retire(int num, void *data)
 		gmugos->dev_hnd);
 
 	return IRQ_HANDLED;
+}
+
+static void hgsl_snapshot_dump(struct qcom_hgsl *hgsl_dev, uint32_t *msg_buffer, u32 dev_hnd)
+{
+	struct hgsl_ipcq_gvm_state_dump_msg msg = {0};
+	struct hgsl_context *ctxt = NULL;
+	struct hgsl_priv *priv = NULL;
+	int ib_idx = 0;
+	int ret = 0;
+	u32 dev_id = hgsl_hnd2id(dev_hnd);
+	struct hgsl_mem_node *mem_node = NULL;
+	uint32_t *snapshot_buffer = NULL;
+	struct iosys_map buf_vmap = { 0 };
+	struct hgsl_snapshot_info_t snapshot_info = {0};
+	uint32_t buf_size = 0;
+	uint32_t used_size = 0;
+	enum gsl_devhandle_t devhandle = hgsl_dev->device_handle[dev_id];
+	struct HfiMsgHeader_t *msg_header = (struct HfiMsgHeader_t *)msg_buffer;
+
+	if (msg_header->msg_size_dword * sizeof(uint32_t) !=
+		sizeof(struct hgsl_ipcq_gvm_state_dump_msg)) {
+		LOGE("size not match header 0x%x", msg_header->msg_size_dword);
+		return;
+	}
+
+	memcpy(&msg, msg_buffer, msg_header->msg_size_dword * sizeof(uint32_t));
+	LOGI("msgid 0x%x type 0x%x size_dw 0x%x dev_id %d ctxtid %d gpuaddr 0x%llx size 0x%x",
+		msg_header->msg_id, msg_header->msg_type,
+		msg_header->msg_size_dword, dev_id, msg.ctxt_id, msg.gpuaddr[0], msg.size_dw[0]);
+
+	ctxt = hgsl_get_context(hgsl_dev, dev_hnd, msg.ctxt_id);
+	if (!ctxt) {
+		LOGE("FAILED TO GET ctxt");
+		return;
+	}
+
+	priv = ctxt->priv;
+	if (!priv) {
+		LOGE("Invalid hgsl_priv!");
+		hgsl_put_context(ctxt);
+		return;
+	}
+
+	mem_node = (struct hgsl_mem_node *)hgsl_mem_node_zalloc(priv->dev->cache_flags);
+	if (!mem_node) {
+		LOGE("FAILED to allocated snapshot memory node");
+		goto send_msg;
+	}
+
+	ret = hgsl_sharedmem_alloc(priv->dev->dev,
+		HGSL_SNAPSHOT_BUFFER_SIZE_IN_BYTES, 0, mem_node);
+	if (ret) {
+		LOGE("Allocated DMA buffer is invalid");
+		goto send_msg;
+	}
+
+	dma_buf_begin_cpu_access(mem_node->dma_buf, DMA_BIDIRECTIONAL);
+	ret = dma_buf_vmap_unlocked(mem_node->dma_buf, &buf_vmap);
+	if (ret) {
+		LOGE("failed to map dbq buffer\n");
+		goto send_msg;
+	}
+
+	snapshot_buffer = (uint32_t *)buf_vmap.vaddr;
+	for (ib_idx = 0; ib_idx < msg.ib_num; ib_idx++)
+		hgsl_snapshot_parse_ib1(priv, devhandle, msg.gpuaddr[ib_idx],
+			msg.size_dw[ib_idx] * sizeof(uint32_t), &snapshot_info);
+
+	hgsl_snapshot_flush_memory(&snapshot_info, snapshot_buffer,
+		"state_dump", &used_size);
+	buf_size = HGSL_SNAPSHOT_BUFFER_SIZE_IN_BYTES;
+
+send_msg:
+	hgsl_hyp_export_memory(&priv->hyp_priv,
+		devhandle, mem_node, used_size, buf_size,
+		IB1_SNAPSHOT_BUF, msg_header->msg_packet_seq_no);
+
+	if (buf_vmap.vaddr) {
+		dma_buf_vunmap_unlocked(mem_node->dma_buf, &buf_vmap);
+		dma_buf_end_cpu_access(mem_node->dma_buf, DMA_BIDIRECTIONAL);
+	}
+
+	if (mem_node)
+		hgsl_sharedmem_free(mem_node);
+
+	hgsl_put_context(ctxt);
 }
 
 /* Return updated read/write index after removing/adding message with size msg_size.
@@ -141,7 +228,7 @@ static void hgsl_ipcq_msg_handler(struct qcom_hgsl *hgsl_dev, uint32_t *msg_buff
 
 	switch (msg_header->msg_id) {
 	case GSL_IPCQ_SNAPSHOT_DUMP: {
-		LOGI("GSL_IPCQ_SNAPSHOT_DUMP handler is called.");
+		hgsl_snapshot_dump(hgsl_dev, msg_buffer, dev_hnd);
 	} break;
 
 	default:
@@ -321,7 +408,7 @@ static int hgsl_syscon_node_regmap(struct hgsl_gmugos *gmugos,
 	regmap = syscon_regmap_lookup_by_compatible(syscon_name);
 	if (IS_ERR_OR_NULL(regmap)) {
 		LOGE("failed to regmap node\n");
-		ret = PTR_ERR(regmap);
+		ret = regmap ? PTR_ERR(regmap) : -EINVAL;
 		goto out;
 	}
 
@@ -371,7 +458,7 @@ void hgsl_gmugos_irq_free(struct hgsl_gmugos_irq *irq)
 
 	/* Disable and free IRQ */
 	disable_irq(irq->num);
-	if (!IS_ERR_OR_NULL(irq->irq_workqueue)) {
+	if (irq->irq_workqueue) {
 		flush_workqueue(irq->irq_workqueue);
 		destroy_workqueue(irq->irq_workqueue);
 		irq->irq_workqueue = NULL;
@@ -393,12 +480,12 @@ int hgsl_init_gmugos(struct platform_device *pdev, uint32_t devhandle,
 	int irq_num = 0;
 
 	if (dev_id >= HGSL_DEVICE_NUM) {
-		dev_err(&pdev->dev, "Invalid dev handle %u\n", devhandle);
+		LOGE("Invalid dev handle %u for dev_id %u\n", devhandle, dev_id);
 		return -EFAULT;
 	}
 
 	if (irq_idx >= HGSL_GMUGOS_IRQ_NUM) {
-		dev_err(&pdev->dev, "Invalid irq index %u\n", irq_idx);
+		LOGE("Invalid irq index %u for devhandle %u\n", irq_idx, devhandle);
 		ret = -EFAULT;
 		return ret;
 	}
@@ -422,14 +509,11 @@ int hgsl_init_gmugos(struct platform_device *pdev, uint32_t devhandle,
 
 	if (mask_bits & RGSGOS_IRQ_MASK) {
 		if (!gmugos_irq->irq_workqueue) {
-			char irq_wq_name[HGSL_GMUGOS_WQ_NAME_LEN];
-
-			snprintf(irq_wq_name, sizeof(irq_wq_name), "%s_workqueue",
-				name);
-			gmugos_irq->irq_workqueue = alloc_workqueue(irq_wq_name, WQ_UNBOUND, 1);
-			if (IS_ERR_OR_NULL(gmugos_irq->irq_workqueue)) {
-				LOGE("FAILED to allocated %s wq", irq_wq_name);
-				ret = ENOMEM;
+			gmugos_irq->irq_workqueue =
+				alloc_ordered_workqueue("%s_workqueue", WQ_MEM_RECLAIM, name);
+			if (!gmugos_irq->irq_workqueue) {
+				LOGE("FAILED to allocated %s wq", name);
+				ret = -ENOMEM;
 				goto out;
 			} else {
 				INIT_WORK(&gmugos_irq->irq_work, hgsl_gmugos_handle_ipcq_msg);

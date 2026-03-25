@@ -12,10 +12,12 @@
 #include "hgsl_trace.h"
 
 /*
- * Define an kmem cache for the memobj structures since we
- * allocate and free them so frequently
+ * Define kmem caches for the objs structures
+ * since we allocate and free them so frequently
  */
 static struct kmem_cache *memobjs_cache;
+static struct kmem_cache *cmdobjs_cache;
+static struct kmem_cache *syncobjs_cache;
 
 static void _timestamp_signaled(struct qcom_hgsl *hgsl,
 		struct hgsl_event_group *group, void *priv, int ret);
@@ -49,12 +51,12 @@ static void syncobj_destroy_object(struct hgsl_drawobj *drawobj)
 	}
 
 	kfree(syncobj->synclist);
-	kfree(syncobj);
+	kmem_cache_free(syncobjs_cache, syncobj);
 }
 
 static void cmdobj_destroy_object(struct hgsl_drawobj *drawobj)
 {
-	kfree(CMDOBJ(drawobj));
+	kmem_cache_free(cmdobjs_cache, CMDOBJ(drawobj));
 }
 
 static void timelineobj_destroy_object(struct hgsl_drawobj *drawobj)
@@ -95,7 +97,9 @@ static void syncobj_timer(struct timer_list *t)
 	struct hgsl_drawobj_sync *syncobj = from_timer(syncobj, t, timer);
 	struct hgsl_drawobj *drawobj;
 	struct hgsl_drawobj_sync_event *event;
+	struct hgsl_context *ctxt;
 	unsigned int i;
+	u32 rts = 0;
 
 	drawobj = DRAWOBJ(syncobj);
 	if (!kref_get_unless_zero(&drawobj->refcount))
@@ -106,8 +110,12 @@ static void syncobj_timer(struct timer_list *t)
 		return;
 	}
 
-	LOGE("hgsl: possible gpu syncpoint deadlock for context %u timestamp %u\n",
-		drawobj->context->context_id, drawobj->timestamp);
+	ctxt = drawobj->context;
+	if (ctxt->shadow_ts)
+		rts = get_context_retired_ts(ctxt);
+
+	LOGE("hgsl: possible gpu syncpoint deadlock for context %u timestamp %u retired %u queued %u\n",
+		ctxt->context_id, drawobj->timestamp, rts, ctxt->queued_ts);
 	LOGE("      pending events:\n");
 	for (i = 0; i < syncobj->numsyncs; i++) {
 		event = &syncobj->synclist[i];
@@ -609,7 +617,7 @@ struct hgsl_drawobj_sync *hgsl_drawobj_sync_create(
 	struct hgsl_context *ctxt)
 {
 	struct hgsl_drawobj_sync *syncobj =
-		kzalloc(sizeof(*syncobj), GFP_KERNEL);
+		kmem_cache_alloc(syncobjs_cache, GFP_KERNEL | __GFP_ZERO);
 	int ret;
 
 	if (!syncobj)
@@ -617,7 +625,7 @@ struct hgsl_drawobj_sync *hgsl_drawobj_sync_create(
 
 	ret = drawobj_init(hgsl_priv, ctxt, &syncobj->base, SYNCOBJ_TYPE);
 	if (ret) {
-		kfree(syncobj);
+		kmem_cache_free(syncobjs_cache, syncobj);
 		return ERR_PTR(ret);
 	}
 
@@ -636,7 +644,8 @@ struct hgsl_drawobj_cmd *hgsl_drawobj_cmd_create(
 	struct hgsl_priv *hgsl_priv, struct hgsl_context *ctxt,
 	u64 flags, u32 type)
 {
-	struct hgsl_drawobj_cmd *cmdobj = kzalloc(sizeof(*cmdobj), GFP_KERNEL);
+	struct hgsl_drawobj_cmd *cmdobj =
+		kmem_cache_alloc(cmdobjs_cache, GFP_KERNEL | __GFP_ZERO);
 	int ret;
 
 	if (!cmdobj)
@@ -645,7 +654,7 @@ struct hgsl_drawobj_cmd *hgsl_drawobj_cmd_create(
 	ret = drawobj_init(hgsl_priv, ctxt, &cmdobj->base,
 		(type & (CMDOBJ_TYPE | MARKEROBJ_TYPE)));
 	if (ret) {
-		kfree(cmdobj);
+		kmem_cache_free(cmdobjs_cache, cmdobj);
 		return ERR_PTR(ret);
 	}
 
@@ -800,6 +809,7 @@ static int drawobj_add_sync_timeline(struct hgsl_priv *hgsl_priv,
 		clear_bit(event->id, &syncobj->pending);
 
 		if (dma_fence_is_signaled(event->fence)) {
+			hgsl_dispatch_queue_context(drawobj->context);
 			trace_syncpoint_fence_expire(syncobj, "signaled");
 			dma_fence_put(event->fence);
 			ret = 0;
@@ -1141,11 +1151,53 @@ int hgsl_drawobj_sync_add_synclist(struct hgsl_priv *hgsl_priv,
 
 void hgsl_drawobjs_deinit(void)
 {
-	if (!IS_ERR(memobjs_cache))
+	if (!IS_ERR_OR_NULL(memobjs_cache)) {
 		kmem_cache_destroy(memobjs_cache);
+		memobjs_cache = NULL;
+	}
+
+	if (!IS_ERR_OR_NULL(cmdobjs_cache)) {
+		kmem_cache_destroy(cmdobjs_cache);
+		cmdobjs_cache = NULL;
+	}
+
+	if (!IS_ERR_OR_NULL(syncobjs_cache)) {
+		kmem_cache_destroy(syncobjs_cache);
+		syncobjs_cache = NULL;
+	}
 }
 
-void hgsl_drawobjs_init(void)
+int hgsl_drawobjs_init(void)
 {
+	int ret = 0;
+
 	memobjs_cache = KMEM_CACHE(hgsl_memobj_node, 0);
+	if (IS_ERR_OR_NULL(memobjs_cache)) {
+		LOGE("Failed to allocate memobjs_cache.\n");
+		memobjs_cache = NULL;
+		return -ENOMEM;
+	}
+
+	cmdobjs_cache = KMEM_CACHE(hgsl_drawobj_cmd, 0);
+	if (IS_ERR_OR_NULL(cmdobjs_cache)) {
+		LOGE("Failed to allocate cmdobjs_cache.\n");
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	syncobjs_cache = KMEM_CACHE(hgsl_drawobj_sync, 0);
+	if (IS_ERR_OR_NULL(syncobjs_cache)) {
+		LOGE("Failed to allocate syncobjs_cache.\n");
+		kmem_cache_destroy(cmdobjs_cache);
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	return 0;
+err:
+	kmem_cache_destroy(memobjs_cache);
+	memobjs_cache = NULL;
+	cmdobjs_cache = NULL;
+	syncobjs_cache = NULL;
+	return ret;
 }
