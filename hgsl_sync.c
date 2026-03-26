@@ -172,12 +172,15 @@ static void hgsl_hsync_timeline_signal(
 		return;
 
 	spin_lock_irqsave(&timeline->lock, flags);
-	if (hgsl_ts32_ge(timeline->last_ts, ts)) {
-		spin_unlock_irqrestore(&timeline->lock, flags);
-		goto out;
-	}
 
-	timeline->last_ts = ts;
+	/*
+	 * Advance last_ts forward only. Always scan fence_list regardless,
+	 * because a fence may be inserted after the timeline has already
+	 * passed its timestamp (GPU retires ts before userspace creates fence).
+	 */
+	if (hgsl_ts32_ge(ts, timeline->last_ts))
+		timeline->last_ts = ts;
+
 	list_for_each_entry_safe(cur, next, &timeline->fence_list,
 					child_list) {
 		if (dma_fence_is_signaled_locked(&cur->fence)) {
@@ -190,7 +193,6 @@ static void hgsl_hsync_timeline_signal(
 	list_for_each_entry_safe(cur, next, &flist, child_list)
 		dma_fence_put(&cur->fence);
 
-out:
 	hgsl_hsync_timeline_put(timeline);
 }
 
@@ -288,7 +290,8 @@ static bool hgsl_hsync_has_signaled(struct dma_fence *base)
 			container_of(base, struct hgsl_hsync_fence, fence);
 	struct hgsl_hsync_timeline *timeline = fence->timeline;
 
-	return hgsl_ts32_ge(timeline->last_ts, fence->ts);
+	/* last_ts may be read without timeline->lock (e.g. dma_fence_is_signaled) */
+	return hgsl_ts32_ge(READ_ONCE(timeline->last_ts), fence->ts);
 }
 
 static void hgsl_hsync_fence_release(struct dma_fence *base)
