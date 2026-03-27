@@ -207,6 +207,54 @@ void hgsl_mmu_pagetable_init(struct hgsl_mmu *mmu,
 	atomic_long_set(&pagetable->stats.max_mapped, 0);
 }
 
+static int hgsl_mmu_populate_cbs(struct platform_device *pdev, const char *name)
+{
+	struct device_node *parent = pdev->dev.of_node;
+	struct device_node *child = NULL;
+	struct platform_device *child_pdev = NULL;
+	int ret = 0;
+
+	if (!IS_ENABLED(CONFIG_OF) || !parent) {
+		dev_info(&pdev->dev, "hgsl-mmu: invalid config or parent node\n");
+		ret = -ENODEV;
+		goto out;
+	}
+
+	child = of_get_child_by_name(parent, name);
+	if (!child) {
+		ret = -ENODEV;
+		dev_info(&pdev->dev, "hgsl-mmu: DT child '%s' absent; skipping\n", name);
+		goto out;
+	}
+
+	/*
+	 * If a platform_device for this child node already exists, do NOT create
+	 * another one. This also means IOMMU has already been attached.
+	 */
+	child_pdev = of_find_device_by_node(child);
+	if (child_pdev) {
+		dev_info(&pdev->dev, "hgsl-mmu: child '%pOF' already populated as '%s'\n",
+			 child, dev_name(&child_pdev->dev));
+		put_device(&child_pdev->dev);
+		of_node_put(child);
+		ret = -ENODEV;
+		goto out;
+	}
+
+	/* Create platform device for each gfx3d_user CB */
+	child_pdev = of_platform_device_create(child, NULL, &pdev->dev);
+	if (child_pdev)
+		LOGD("populated %pOF\n", child);
+	else {
+		dev_warn(&pdev->dev, "hgsl-mmu: failed to create %pOF\n", child);
+		ret = -ENODEV;
+	}
+
+	of_node_put(child);
+out:
+	return ret;
+}
+
 static int hgsl_mmu_bind(struct device *dev, struct device *master, void *data)
 {
 	struct qcom_hgsl *hgsl = data;
@@ -280,11 +328,62 @@ static const struct component_ops hgsl_mmu_cb_component_ops = {
 
 static int hgsl_mmu_dev_probe(struct platform_device *pdev)
 {
+	int ret[HGSL_DEVICE_NUM] = {0};
+	struct device *dev = &pdev->dev;
+	struct device *hgsl_dev;
+	struct qcom_hgsl *hgsl;
+	struct device_node *hgsl_np;
+	u32 dev_id = 0;
+	char cb_name[64] = {'\0'};
+
+	/* CB path: only register component, never populate here */
 	if (of_device_is_compatible(pdev->dev.of_node, "qcom,smmu-hgsl-cb"))
 		return component_add(&pdev->dev, &hgsl_mmu_cb_component_ops);
 
-	/* Fill out the rest of the devices in the node */
-	of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
+	/* MMU path: populate child based on FV status for each of the GPU dev*/
+	hgsl_np = of_parse_phandle(dev->of_node, "qcom,hgsl", 0);
+	if (!hgsl_np) {
+		/* when phandle is missing then populate all the children in node */
+		dev_err(dev, "hgsl-mmu: missing qcom,hgsl phandle\n");
+		of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
+		return component_add(&pdev->dev, &hgsl_mmu_component_ops);
+	}
+
+	hgsl_dev = bus_find_device_by_of_node(&platform_bus_type, hgsl_np);
+	of_node_put(hgsl_np);
+	if (!hgsl_dev)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+							"hgsl-mmu: hgsl_dev not ready\n");
+
+	hgsl = dev_get_drvdata(hgsl_dev);
+	put_device(hgsl_dev);
+	if (!hgsl)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+							"hgsl-mmu: drvdata missing\n");
+
+	for (dev_id = 0; dev_id < HGSL_DEVICE_NUM; dev_id++) {
+		if (get_fv_status(hgsl, dev_id)) {
+			snprintf(cb_name, sizeof(cb_name), "gfx3d_user_%d", dev_id);
+			ret[dev_id] = hgsl_mmu_populate_cbs(pdev, cb_name);
+			if (ret[dev_id])
+				dev_warn(&pdev->dev,
+						"hgsl_mmu_populate_cbs failed for GPU %u with ret=%d\n",
+						dev_id, ret[dev_id]);
+		} else {
+			LOGI("Skipping IOMMU init for GPU %d - FV not enabled (fv_on=%d, feature_mask=0x%x)",
+				dev_id, hgsl->fv_on, hgsl->gvm_settings[dev_id].enabled_feature_mask);
+			ret[dev_id] = -ENODEV;  // Mark as explicitly skipped
+		}
+	}
+
+	/*  When hgsl_mmu_populate_cbs() fails for both GPUs then consider probe failure */
+	if (ret[HGSL_GPU_0] && ret[HGSL_GPU_1]) {
+		dev_err(dev,
+				"hgsl-mmu: populate CBs failed for GPU0=%d GPU1=%d\n",
+				ret[HGSL_GPU_0], ret[HGSL_GPU_1]);
+		return dev_err_probe(dev, -ENODEV,
+							"hgsl-mmu: populate CBs failed for both GPU devices\n");
+	}
 
 	return component_add(&pdev->dev, &hgsl_mmu_component_ops);
 }

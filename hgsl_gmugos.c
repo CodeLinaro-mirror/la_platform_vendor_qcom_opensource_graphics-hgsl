@@ -25,7 +25,7 @@ static irqreturn_t hgsl_gmugos_ts_retire(int num, void *data)
 	u32 dev_id = hgsl_hnd2id(gmugos->dev_hnd);
 
 	if (dev_id >= HGSL_DEVICE_NUM) {
-		pr_warn_ratelimited("Invalid dev handle %u",
+		pr_warn_ratelimited("Invalid dev handle %u\n",
 			gmugos->dev_hnd);
 		return IRQ_HANDLED;
 	}

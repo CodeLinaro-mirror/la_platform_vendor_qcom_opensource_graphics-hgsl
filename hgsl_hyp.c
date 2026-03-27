@@ -3399,7 +3399,6 @@ int hgsl_hyp_ctxt_create_v2(struct device *dev,
 	shadow_mem_node->fd = -1;
 	shadow_mem_node->mem_node_iommu_info.ptr_hgsl_priv = priv;
 
-	// TO DO: ctxt record buffer size will be supplied by BE through RPC_GVM_INIT
 	size_bytes = PAGE_SIZE;
 	ret = hgsl_sharedmem_alloc(dev, size_bytes, 0, shadow_mem_node);
 	if (ret) {
@@ -3522,7 +3521,7 @@ out:
 		}
 
 		if (ctxt->is_fe_shadow) {
-			hgsl_hyp_mem_unmap_smmu(hab_channel, shadow_mem_node);
+
 			hgsl_sharedmem_free(shadow_mem_node);
 			ctxt->shadow_ts_node = NULL;
 		} else if (shadow_mem_node)
