@@ -157,6 +157,7 @@ struct hgsl_hsync_fence *hgsl_hsync_fence_create(
 	list_add_tail(&fence->child_list, &timeline->fence_list);
 	spin_unlock_irqrestore(&timeline->lock, flags);
 
+	trace_hsync_fence_create(fence);
 	return fence;
 }
 
@@ -179,8 +180,10 @@ static void hgsl_hsync_timeline_signal(
 	timeline->last_ts = ts;
 	list_for_each_entry_safe(cur, next, &timeline->fence_list,
 					child_list) {
-		if (dma_fence_is_signaled_locked(&cur->fence))
+		if (dma_fence_is_signaled_locked(&cur->fence)) {
 			list_move_tail(&cur->child_list, &flist);
+			trace_hsync_fence_signal(cur);
+		}
 	}
 	spin_unlock_irqrestore(&timeline->lock, flags);
 
@@ -200,8 +203,9 @@ int hgsl_hsync_timeline_create(struct hgsl_context *context)
 		return -ENOMEM;
 
 	snprintf(timeline->name, HGSL_TIMELINE_NAME_LEN,
-		"timeline_%s_%d",
-		current->comm, current->pid);
+		"timeline_%s_%d_%u_%u",
+		current->comm, current->pid,
+		context->devhandle, context->context_id);
 
 	kref_init(&timeline->kref);
 	timeline->fence_context = dma_fence_context_alloc(1);
@@ -294,10 +298,12 @@ static void hgsl_hsync_fence_release(struct dma_fence *base)
 	struct hgsl_hsync_timeline *timeline = fence->timeline;
 
 	if (timeline) {
-		WARN_ON(unlikely(!dma_fence_is_signaled(base)));
+		if (WARN_ON(unlikely(!dma_fence_is_signaled(base))))
+			trace_hsync_fence_release_unsignal(fence);
 		hgsl_hsync_timeline_put(timeline);
 	}
 
+	trace_hsync_fence_release(fence);
 	dma_fence_free(base);
 }
 
@@ -922,8 +928,8 @@ static const struct dma_fence_ops hgsl_isync_fence_ops = {
 void hgsl_get_fence_name(struct dma_fence *f,
 	char *name, u32 max_size)
 {
-	int len = scnprintf(name, max_size, "%s %s",
-			f->ops->get_driver_name(f),
+	int len = scnprintf(name, max_size, "%p %s %s",
+			f, f->ops->get_driver_name(f),
 			f->ops->get_timeline_name(f));
 
 	if (f->ops->fence_value_str) {
