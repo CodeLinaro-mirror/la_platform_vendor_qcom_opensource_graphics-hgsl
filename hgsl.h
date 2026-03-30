@@ -419,6 +419,25 @@ struct hgsl_memobj_node {
 	unsigned long priv;
 };
 
+/**
+ * struct ctx_queue_header - Header of the per-context doorbell command queue
+ * (DBCQ).  The queue body immediately follows this header in memory.
+ */
+struct ctx_queue_header {
+	uint32_t version;          /* Version of the context queue header */
+	uint32_t startAddr;        /* GMU VA of start of queue */
+	uint32_t dwSize;           /* Queue size in dwords */
+	uint32_t outFenceTs;       /* Timestamp of the last output hw fence sent to TxQueue */
+	uint32_t syncObjTs;        /* Timestamp of last SYNC object that has been signaled */
+	uint32_t readIdx;          /* Read index of the queue */
+	uint32_t writeIdx;         /* Write index of the queue */
+	uint32_t hwFenceArrayAddr; /* GMU VA of the buffer to store output hw fences */
+	uint32_t hwFenceArraySize; /* Size (bytes) of the buffer to store output hw fences */
+	uint32_t dbqSignal;
+	uint32_t unused0;
+	uint32_t unused1;
+};
+
 static inline bool hgsl_ts32_ge(uint32_t a, uint32_t b)
 {
 	static const uint32_t TIMESTAMP_WINDOW = 0x80000000;
@@ -698,7 +717,48 @@ static inline bool hgsl_check_timestamp(struct hgsl_priv *priv,
 	return hgsl_ts32_ge(retired, timestamp);
 }
 
-void hgsl_get_fence_info(struct hgsl_drawobj_sync_event *event);
+void hgsl_get_fence_name(struct dma_fence *f, char *name, u32 max_size);
+struct event_fence_info;
+int hgsl_fill_fence_info(struct dma_fence *fence, struct event_fence_info *info_ptr);
+
+/**
+ * hgsl_hsync_get_name / hgsl_isync_get_name - uniform getter wrappers so
+ * that hgsl_trace() can call them with the same (obj, buf, size) signature
+ * regardless of fence type.
+ */
+static inline void hgsl_hsync_get_name(struct hgsl_hsync_fence *f,
+	char *name, size_t size)
+{
+	hgsl_get_fence_name(&f->fence, name, (u32)size);
+}
+
+static inline void hgsl_isync_get_name(struct hgsl_isync_fence *f,
+	char *name, size_t size)
+{
+	hgsl_get_fence_name(&f->fence, name, (u32)size);
+}
+
+/**
+ * hgsl_trace - guard a trace event behind its enabled() check, build the
+ *              human-readable name string, then fire the event.
+ *
+ * @_trace_fn:  trace function (e.g. trace_hsync_fence_create)
+ * @_get_name:  getter with signature (src, char *buf, size_t size) that
+ *              fills buf; use hgsl_hsync_get_name, hgsl_isync_get_name, or
+ *              hgsl_syncobj_get_fence_names
+ * @_src:       first argument forwarded to @_get_name
+ * @...:        all arguments to @_trace_fn except the trailing name string
+ *
+ * The name string is appended automatically as the last argument.
+ */
+#define hgsl_trace(_trace_fn, _get_name, _src, ...) do {	\
+	if (_trace_fn##_enabled()) {				\
+		char _name[HGSL_FENCE_NAME_LEN * 2];		\
+		_get_name((_src), _name, sizeof(_name));	\
+		_trace_fn(__VA_ARGS__, _name);			\
+	}							\
+} while (0)
+
 int hgsl_issue_drawobj(struct qcom_hgsl *hgsl, struct hgsl_drawobj *drawobj);
 
 int hgsl_events_init(struct qcom_hgsl *hgsl);

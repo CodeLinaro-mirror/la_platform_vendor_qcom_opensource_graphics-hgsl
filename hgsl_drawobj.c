@@ -861,12 +861,28 @@ static int drawobj_add_sync_fence(struct hgsl_priv *hgsl_priv,
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 
+	/*
+	 * Populate fence info before async_wait so the names are available
+	 * even when the fence is already signaled at queue time (in which
+	 * case async_wait returns NULL and we return early below).
+	 */
+	if (priv) {
+		struct dma_fence *f = sync_file_get_fence(sync_fence.fd);
+
+		if (f) {
+			if (hgsl_fill_fence_info(f, priv)) {
+				kfree(priv);
+				priv = NULL;
+			}
+			dma_fence_put(f);
+		}
+	}
+	event->priv = priv;
+
 	set_bit(event->id, &syncobj->pending);
 
 	event->handle = hgsl_sync_fence_async_wait(sync_fence.fd,
 		drawobj_sync_fence_func, event);
-
-	event->priv = priv;
 
 	if (IS_ERR_OR_NULL(event->handle)) {
 		int ret = PTR_ERR(event->handle);
@@ -884,8 +900,6 @@ static int drawobj_add_sync_fence(struct hgsl_priv *hgsl_priv,
 
 		return ret;
 	}
-
-	hgsl_get_fence_info(event);
 
 	for (i = 0; priv && i < priv->num_fences; i++)
 		trace_syncpoint_fence(syncobj, priv->fences[i].name);

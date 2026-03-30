@@ -18,10 +18,11 @@
 #include "hgsl_drawobj.h"
 
 DECLARE_EVENT_CLASS(hgsl_hsync_class,
-	TP_PROTO(struct hgsl_hsync_fence *hsync),
-	TP_ARGS(hsync),
+	TP_PROTO(struct hgsl_hsync_fence *hsync, char *fence_name),
+	TP_ARGS(hsync, fence_name),
 	TP_STRUCT__entry(
 		__string(tl_name, hsync->timeline->name)
+		__string(fence_name, fence_name)
 		__field(u32, devhandle)
 		__field(u32, context_id)
 		__field(u32, ts)
@@ -29,35 +30,37 @@ DECLARE_EVENT_CLASS(hgsl_hsync_class,
 	),
 	TP_fast_assign(
 		__assign_str(tl_name);
+		__assign_str(fence_name);
 		__entry->devhandle = hsync->timeline->context->devhandle;
 		__entry->context_id = hsync->timeline->context->context_id;
 		__entry->ts = hsync->ts;
 		__entry->last_ts = hsync->timeline->last_ts;
 	),
-	TP_printk("ctx=[%u:%u] ts=%u last_ts=%u timeline=%s",
+	TP_printk("ctx=[%u:%u] ts=%u last_ts=%u timeline=%s fence=%s",
 			__entry->devhandle, __entry->context_id,
-			__entry->ts, __entry->last_ts, __get_str(tl_name)
+			__entry->ts, __entry->last_ts, __get_str(tl_name),
+			__get_str(fence_name)
 	)
 );
 
 DEFINE_EVENT(hgsl_hsync_class, hsync_fence_create,
-	TP_PROTO(struct hgsl_hsync_fence *hsync),
-	TP_ARGS(hsync)
+	TP_PROTO(struct hgsl_hsync_fence *hsync, char *fence_name),
+	TP_ARGS(hsync, fence_name)
 );
 
 DEFINE_EVENT(hgsl_hsync_class, hsync_fence_signal,
-	TP_PROTO(struct hgsl_hsync_fence *hsync),
-	TP_ARGS(hsync)
+	TP_PROTO(struct hgsl_hsync_fence *hsync, char *fence_name),
+	TP_ARGS(hsync, fence_name)
 );
 
 DEFINE_EVENT(hgsl_hsync_class, hsync_fence_release_unsignal,
-	TP_PROTO(struct hgsl_hsync_fence *hsync),
-	TP_ARGS(hsync)
+	TP_PROTO(struct hgsl_hsync_fence *hsync, char *fence_name),
+	TP_ARGS(hsync, fence_name)
 );
 
 DEFINE_EVENT(hgsl_hsync_class, hsync_fence_release,
-	TP_PROTO(struct hgsl_hsync_fence *hsync),
-	TP_ARGS(hsync)
+	TP_PROTO(struct hgsl_hsync_fence *hsync, char *fence_name),
+	TP_ARGS(hsync, fence_name)
 );
 
 TRACE_EVENT(isync_release,
@@ -104,14 +107,32 @@ DEFINE_EVENT(hgsl_isync_class, isync_signal,
 	TP_ARGS(timeline_id, timestamp)
 );
 
-DEFINE_EVENT(hgsl_isync_class, isync_fence_alloc,
-	TP_PROTO(u32 timeline_id, u64 timestamp),
-	TP_ARGS(timeline_id, timestamp)
+DECLARE_EVENT_CLASS(hgsl_isync_fence_class,
+	TP_PROTO(u32 timeline_id, u64 timestamp, char *fence_name),
+	TP_ARGS(timeline_id, timestamp, fence_name),
+	TP_STRUCT__entry(
+		__field(u32, timeline_id)
+		__field(u64, timestamp)
+		__string(fence_name, fence_name)
+	),
+	TP_fast_assign(
+		__entry->timeline_id = timeline_id;
+		__entry->timestamp = timestamp;
+		__assign_str(fence_name);
+	),
+	TP_printk("timeline_id=%u ts=%llu fence=%s",
+		__entry->timeline_id, __entry->timestamp, __get_str(fence_name)
+	)
 );
 
-DEFINE_EVENT(hgsl_isync_class, isync_fence_release,
-	TP_PROTO(u32 timeline_id, u64 timestamp),
-	TP_ARGS(timeline_id, timestamp)
+DEFINE_EVENT(hgsl_isync_fence_class, isync_fence_alloc,
+	TP_PROTO(u32 timeline_id, u64 timestamp, char *fence_name),
+	TP_ARGS(timeline_id, timestamp, fence_name)
+);
+
+DEFINE_EVENT(hgsl_isync_fence_class, isync_fence_release,
+	TP_PROTO(u32 timeline_id, u64 timestamp, char *fence_name),
+	TP_ARGS(timeline_id, timestamp, fence_name)
 );
 
 TRACE_EVENT(drawobj_timeline,
@@ -213,8 +234,8 @@ DEFINE_EVENT(hgsl_drawobj_class, drawobj_destroy,
 );
 
 DECLARE_EVENT_CLASS(hgsl_syncobj_class,
-	TP_PROTO(struct hgsl_drawobj_sync *syncobj),
-	TP_ARGS(syncobj),
+	TP_PROTO(struct hgsl_drawobj_sync *syncobj, char *fence_names),
+	TP_ARGS(syncobj, fence_names),
 	TP_STRUCT__entry(
 		__field(u32, devhandle)
 		__field(u32, context_id)
@@ -223,6 +244,7 @@ DECLARE_EVENT_CLASS(hgsl_syncobj_class,
 		__field(u32, refcount)
 		__field(u32, numsyncs)
 		__field(uintptr_t, syncobj)
+		__string(fence_names, fence_names)
 	),
 	TP_fast_assign(
 		__entry->devhandle = syncobj->base.context->devhandle;
@@ -232,21 +254,22 @@ DECLARE_EVENT_CLASS(hgsl_syncobj_class,
 		__entry->refcount = kref_read(&syncobj->base.context->kref);
 		__entry->numsyncs = syncobj->numsyncs;
 		__entry->syncobj = (uintptr_t)syncobj;
+		__assign_str(fence_names);
 	),
-	TP_printk("ctx=[%u:%u] drawq[%u-%u] refcount=%u numsyncs=%u syncobj=0x%llx",
+	TP_printk("ctx=[%u:%u] drawq[%u-%u] refcount=%u numsyncs=%u syncobj=0x%llx fence_names=%s",
 		__entry->devhandle, __entry->context_id, __entry->drawq_head,
 		__entry->drawq_tail, __entry->refcount, __entry->numsyncs,
-		__entry->syncobj)
+		__entry->syncobj, __get_str(fence_names))
 );
 
 DEFINE_EVENT(hgsl_syncobj_class, syncobj_queued,
-	TP_PROTO(struct hgsl_drawobj_sync *syncobj),
-	TP_ARGS(syncobj)
+	TP_PROTO(struct hgsl_drawobj_sync *syncobj, char *fence_names),
+	TP_ARGS(syncobj, fence_names)
 );
 
 DEFINE_EVENT(hgsl_syncobj_class, syncobj_retired,
-	TP_PROTO(struct hgsl_drawobj_sync *syncobj),
-	TP_ARGS(syncobj)
+	TP_PROTO(struct hgsl_drawobj_sync *syncobj, char *fence_names),
+	TP_ARGS(syncobj, fence_names)
 );
 
 DECLARE_EVENT_CLASS(syncpoint_timestamp_class,

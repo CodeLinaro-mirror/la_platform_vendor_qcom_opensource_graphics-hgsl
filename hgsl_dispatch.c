@@ -23,6 +23,9 @@ static u32 _context_queue_wait = 10000;
 /* Use a kmem cache to speed up allocations for inflight command objects */
 static struct kmem_cache *obj_cache;
 
+static void hgsl_syncobj_get_fence_names(struct hgsl_drawobj_sync *syncobj,
+	char *buf, size_t buf_size);
+
 /**
  * hgsl_dispatch_requeue_drawobj() - Put a draw objet back on the context
  * queue
@@ -97,12 +100,43 @@ static void _pop_drawobj(struct hgsl_context *ctxt)
 	ctxt->queued--;
 }
 
+static void hgsl_syncobj_get_fence_names(struct hgsl_drawobj_sync *syncobj,
+	char *buf, size_t buf_size)
+{
+	int i, j;
+	size_t len = 0;
+
+	buf[0] = '\0';
+	if (!syncobj->synclist)
+		return;
+	for (i = 0; i < syncobj->numsyncs; i++) {
+		struct hgsl_drawobj_sync_event *event = &syncobj->synclist[i];
+
+		if (event->type == HGSL_CMD_SYNCPOINT_TYPE_FENCE) {
+			struct event_fence_info *info = event->priv;
+
+			for (j = 0; info && j < info->num_fences; j++)
+				len += scnprintf(buf + len, buf_size - len,
+					"%s%s", len ? "," : "",
+					info->fences[j].name);
+		} else if (event->type == HGSL_CMD_SYNCPOINT_TYPE_TIMELINE) {
+			struct event_timeline_info *info = event->priv;
+
+			for (j = 0; info && info[j].timeline; j++)
+				len += scnprintf(buf + len, buf_size - len,
+					"%stl_%u:%llu", len ? "," : "",
+					info[j].timeline, info[j].seqno);
+		}
+	}
+}
+
 static int _retire_syncobj(struct qcom_hgsl *hgsl,
 	struct hgsl_drawobj_sync *syncobj, struct hgsl_context *ctxt)
 {
 
 	if (!hgsl_drawobj_events_pending(syncobj)) {
-		trace_syncobj_retired(syncobj);
+		hgsl_trace(trace_syncobj_retired,
+			hgsl_syncobj_get_fence_names, syncobj, syncobj);
 		_pop_drawobj(ctxt);
 		hgsl_drawobj_destroy(DRAWOBJ(syncobj));
 		return 0;
@@ -484,7 +518,8 @@ static void _queue_syncobj(struct hgsl_context *ctxt,
 {
 	struct hgsl_drawobj *drawobj = DRAWOBJ(syncobj);
 
-	trace_syncobj_queued(syncobj);
+	hgsl_trace(trace_syncobj_queued,
+		hgsl_syncobj_get_fence_names, syncobj, syncobj);
 
 	*timestamp = 0;
 	drawobj->timestamp = 0;
