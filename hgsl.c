@@ -146,20 +146,6 @@ enum HGSL_DBQ_IBDESC_WAIT_TYPE {
 #define HGSL_CTXT_QUEUE_TOTAL_SIZE           PAGE_ALIGN(HGSL_CTXT_QUEUE_INDIRECT_IB_SIZE +\
 							HGSL_CTXT_QUEUE_INDIRECT_IB_OFFSET)
 
-struct ctx_queue_header {
-	uint32_t version;             // Version of the context queue header
-	uint32_t startAddr;           // GMU VA of start of queue
-	uint32_t dwSize;              // Queue size in dwords
-	uint32_t outFenceTs; // Timestamp of the last output hardware fence sent to TxQueue
-	uint32_t syncObjTs;  // Timestamp of last SYNC object that has been signaled
-	uint32_t readIdx;    // Read index of the queue
-	uint32_t writeIdx;   // Write index of the queue
-	uint32_t hwFenceArrayAddr;    // GMU VA of the buffer to store output hardware fences
-	uint32_t hwFenceArraySize;    // Size(bytes) of the buffer to store output hardware fences
-	uint32_t dbqSignal;
-	uint32_t unused0;
-	uint32_t unused1;
-};
 
 static void _signal_contexts(struct qcom_hgsl *hgsl, u32 dev_hnd);
 
