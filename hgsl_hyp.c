@@ -3277,7 +3277,7 @@ static int read_shadowts_mem_be(struct hgsl_hab_channel_t *hab_channel,
 
 out:
 	if (ret)
-		kfree(mem_node);
+		hgsl_mem_node_free(mem_node);
 
 	return ret;
 }
@@ -3390,7 +3390,7 @@ out:
 		if (ctxt->shadow_ts_node && !ctxt->is_fe_shadow) {
 			hgsl_hyp_put_shadowts_mem(hab_channel,
 							ctxt->shadow_ts_node);
-			kfree(ctxt->shadow_ts_node);
+			hgsl_mem_node_free(ctxt->shadow_ts_node);
 			ctxt->shadow_ts_node = NULL;
 		}
 
