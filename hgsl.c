@@ -1808,7 +1808,7 @@ static void _cleanup_shadow(struct hgsl_hab_channel_t *hab_channel,
 		hgsl_sharedmem_free(mem_node);
 	} else {
 		hgsl_hyp_put_shadowts_mem(hab_channel, mem_node);
-		kfree(mem_node);
+		hgsl_mem_node_free(mem_node);
 	}
 
 	ctxt->shadow_ts_flags = 0;
@@ -1935,11 +1935,12 @@ static void hgsl_get_shadowts_mem(struct hgsl_hab_channel_t *hab_channel,
 {
 	struct dma_buf *dma_buf = NULL;
 	int ret = 0;
+	struct qcom_hgsl *hgsl = ctxt->priv->dev;
 
 	if (ctxt->shadow_ts_node)
 		return;
 
-	ctxt->shadow_ts_node = hgsl_zalloc(sizeof(*ctxt->shadow_ts_node));
+	ctxt->shadow_ts_node = hgsl_mem_node_zalloc(hgsl->cache_flags);
 	if (ctxt->shadow_ts_node == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -2998,7 +2999,7 @@ out:
 		} else
 			hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
 
-		hgsl_free(mem_node);
+		hgsl_mem_node_free(mem_node);
 	}
 
 	hgsl_hyp_channel_pool_put(hab_channel);
@@ -3057,7 +3058,7 @@ static int hgsl_ioctl_mem_unmap_smmu(
 
 			hgsl_trace_gpu_mem_total(priv,
 					-(node_found->memdesc.size64));
-			hgsl_free(node_found);
+			hgsl_mem_node_free(node_found);
 		} else {
 			LOGE("mem_unmap_smmu failed %d", ret);
 
@@ -4089,7 +4090,7 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 
 		next = rb_next(&node_found->mem_rb_node);
 		rb_erase(&node_found->mem_rb_node, &priv->mem_mapped);
-		hgsl_free(node_found);
+		hgsl_mem_node_free(node_found);
 	}
 
 	next = rb_first(&priv->mem_allocated);
@@ -5479,10 +5480,15 @@ static int __init hgsl_init(void)
 {
 	int err;
 
+	hgsl_mem_node_cache_init();
+	hgsl_sync_cache_init();
+
 	/* Register qcom_hgsl_driver first so that it can get FV status  */
 	err = platform_driver_register(&qcom_hgsl_driver);
 	if (err) {
 		pr_err("Failed to register hgsl driver: %d\n", err);
+		hgsl_sync_cache_destroy();
+		hgsl_mem_node_cache_destroy();
 		goto exit;
 	}
 
@@ -5507,6 +5513,8 @@ static void __exit hgsl_exit(void)
 {
 	hgsl_mmu_exit();
 	platform_driver_unregister(&qcom_hgsl_driver);
+	hgsl_sync_cache_destroy();
+	hgsl_mem_node_cache_destroy();
 #if IS_ENABLED(CONFIG_QCOM_HGSL_TCSR_SIGNAL)
 	platform_driver_unregister(&hgsl_tcsr_driver);
 #endif

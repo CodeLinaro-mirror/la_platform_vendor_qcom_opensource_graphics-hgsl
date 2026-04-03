@@ -40,6 +40,36 @@ enum {
 
 #define OS_UNUSED(param) ((void)param)
 
+/**
+ * HGSL_ZALLOC_CACHED - Zero-allocate an object, preferring a slab cache and
+ *                       falling back to kzalloc() when the cache is unavailable.
+ *
+ * Both paths zero-initialise the object so callers need not distinguish
+ * between the two allocation paths.
+ *
+ * @_cache: struct kmem_cache * (may be NULL)
+ * @_type:  the struct type to allocate (used for sizeof in the fallback path)
+ * @_gfp:   GFP flags passed to both paths
+ */
+#define HGSL_ZALLOC_CACHED(_cache, _type, _gfp) \
+	(likely(_cache) ? kmem_cache_zalloc((_cache), (_gfp)) \
+			: kzalloc(sizeof(_type), (_gfp)))
+
+/**
+ * HGSL_FREE_CACHED - Return an object to its slab cache, or kfree() it
+ *                    when the cache is unavailable.
+ *
+ * @_cache: struct kmem_cache * (may be NULL)
+ * @_obj:   pointer to the object to free
+ */
+#define HGSL_FREE_CACHED(_cache, _obj) \
+	do { \
+		if (likely(_cache)) \
+			kmem_cache_free((_cache), (_obj)); \
+		else \
+			kfree(_obj); \
+	} while (0)
+
 static inline void *hgsl_malloc(size_t size)
 {
 	if (size <= PAGE_SIZE)

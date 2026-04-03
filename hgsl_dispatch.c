@@ -255,13 +255,13 @@ static int _sendcmd(struct qcom_hgsl *hgsl,
 	int ret;
 	struct cmd_obj *obj;
 
-	obj = kmem_cache_alloc(obj_cache, GFP_KERNEL);
+	obj = HGSL_ZALLOC_CACHED(obj_cache, struct cmd_obj, GFP_KERNEL);
 	if (!obj)
 		return -ENOMEM;
 
 	ret = hgsl_issue_drawobj(hgsl, drawobj);
 	if (ret) {
-		kmem_cache_free(obj_cache, obj);
+		HGSL_FREE_CACHED(obj_cache, obj);
 		return ret;
 	}
 
@@ -270,7 +270,7 @@ static int _sendcmd(struct qcom_hgsl *hgsl,
 
 		/* If this MARKER object is already retired, we can destroy it here */
 		if ((test_bit(CMDOBJ_MARKER_EXPIRED, &cmdobj->priv))) {
-			kmem_cache_free(obj_cache, obj);
+			HGSL_FREE_CACHED(obj_cache, obj);
 			hgsl_drawobj_destroy(drawobj);
 			return 0;
 		}
@@ -604,7 +604,7 @@ static void _retire_drawobjs(struct hgsl_context *ctxt)
 
 		hgsl_drawobj_destroy(drawobj);
 		list_del_init(&obj->node);
-		kmem_cache_free(obj_cache, obj);
+		HGSL_FREE_CACHED(obj_cache, obj);
 	}
 }
 
@@ -875,30 +875,28 @@ int hgsl_dispatch_init(struct qcom_hgsl *hgsl)
 {
 	int ret;
 
-	obj_cache = KMEM_CACHE(cmd_obj, 0);
+	obj_cache = KMEM_CACHE(cmd_obj, SLAB_HWCACHE_ALIGN);
 	if (IS_ERR_OR_NULL(obj_cache)) {
-		LOGE("Failed to allocate obj_cache.\n");
+		LOGW("Failed to allocate obj_cache, falling back to kzalloc.\n");
 		obj_cache = NULL;
-		return -ENOMEM;
 	}
 
-	ret = hgsl_drawobjs_init();
-	if (ret) {
-		LOGE("drawobjs init failed, ret %d\n", ret);
-		goto err;
-	}
+	/* best-effort: cache creation failures fall back to kzalloc */
+	hgsl_drawobjs_init();
 
 	/* Set up the GPU events for the device */
 	ret = hgsl_events_init(hgsl);
 	if (ret) {
 		LOGE("events init failed, ret %d\n", ret);
-		hgsl_drawobjs_deinit();
 		goto err;
 	}
 
 	return 0;
 err:
-	kmem_cache_destroy(obj_cache);
-	obj_cache = NULL;
+	hgsl_drawobjs_deinit();
+	if (!IS_ERR_OR_NULL(obj_cache)) {
+		kmem_cache_destroy(obj_cache);
+		obj_cache = NULL;
+	}
 	return ret;
 }

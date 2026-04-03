@@ -689,6 +689,9 @@ struct hgsl_isync_timeline *hgsl_isync_timeline_get(struct hgsl_priv *priv,
 
 void hgsl_isync_timeline_put(struct hgsl_isync_timeline *timeline);
 
+void hgsl_sync_cache_init(void);
+void hgsl_sync_cache_destroy(void);
+
 int hgsl_isync_query(struct hgsl_priv *priv, uint32_t timeline_id,
 							uint64_t *ts);
 int hgsl_isync_wait_multiple(struct hgsl_priv *priv, struct hgsl_timeline_wait *param);

@@ -43,7 +43,7 @@ static void syncobj_destroy_object(struct hgsl_drawobj *drawobj)
 				struct hgsl_sync_fence_cb *kcb = event->handle;
 
 				dma_fence_put(kcb->fence);
-				kfree(kcb);
+				hgsl_free(kcb);
 			}
 
 		} else if (event->type == HGSL_CMD_SYNCPOINT_TYPE_TIMELINE) {
@@ -52,12 +52,12 @@ static void syncobj_destroy_object(struct hgsl_drawobj *drawobj)
 	}
 
 	kfree(syncobj->synclist);
-	kmem_cache_free(syncobjs_cache, syncobj);
+	HGSL_FREE_CACHED(syncobjs_cache, syncobj);
 }
 
 static void cmdobj_destroy_object(struct hgsl_drawobj *drawobj)
 {
-	kmem_cache_free(cmdobjs_cache, CMDOBJ(drawobj));
+	HGSL_FREE_CACHED(cmdobjs_cache, CMDOBJ(drawobj));
 }
 
 static void timelineobj_destroy_object(struct hgsl_drawobj *drawobj)
@@ -83,13 +83,13 @@ static void cmdobj_destroy(struct hgsl_drawobj *drawobj)
 	/* Destroy the command list */
 	list_for_each_entry_safe(mem, tmpmem, &cmdobj->cmdlist, node) {
 		list_del_init(&mem->node);
-		kmem_cache_free(memobjs_cache, mem);
+		HGSL_FREE_CACHED(memobjs_cache, mem);
 	}
 
 	/* Destroy the memory list */
 	list_for_each_entry_safe(mem, tmpmem, &cmdobj->memlist, node) {
 		list_del_init(&mem->node);
-		kmem_cache_free(memobjs_cache, mem);
+		HGSL_FREE_CACHED(memobjs_cache, mem);
 	}
 }
 
@@ -657,7 +657,7 @@ struct hgsl_drawobj_sync *hgsl_drawobj_sync_create(
 	struct hgsl_context *ctxt)
 {
 	struct hgsl_drawobj_sync *syncobj =
-		kmem_cache_alloc(syncobjs_cache, GFP_KERNEL | __GFP_ZERO);
+		HGSL_ZALLOC_CACHED(syncobjs_cache, struct hgsl_drawobj_sync, GFP_KERNEL);
 	int ret;
 
 	if (!syncobj)
@@ -665,7 +665,7 @@ struct hgsl_drawobj_sync *hgsl_drawobj_sync_create(
 
 	ret = drawobj_init(hgsl_priv, ctxt, &syncobj->base, SYNCOBJ_TYPE);
 	if (ret) {
-		kmem_cache_free(syncobjs_cache, syncobj);
+		HGSL_FREE_CACHED(syncobjs_cache, syncobj);
 		return ERR_PTR(ret);
 	}
 
@@ -685,7 +685,7 @@ struct hgsl_drawobj_cmd *hgsl_drawobj_cmd_create(
 	u64 flags, u32 type)
 {
 	struct hgsl_drawobj_cmd *cmdobj =
-		kmem_cache_alloc(cmdobjs_cache, GFP_KERNEL | __GFP_ZERO);
+		HGSL_ZALLOC_CACHED(cmdobjs_cache, struct hgsl_drawobj_cmd, GFP_KERNEL);
 	int ret;
 
 	if (!cmdobj)
@@ -694,7 +694,7 @@ struct hgsl_drawobj_cmd *hgsl_drawobj_cmd_create(
 	ret = drawobj_init(hgsl_priv, ctxt, &cmdobj->base,
 		(type & (CMDOBJ_TYPE | MARKEROBJ_TYPE)));
 	if (ret) {
-		kmem_cache_free(cmdobjs_cache, cmdobj);
+		HGSL_FREE_CACHED(cmdobjs_cache, cmdobj);
 		return ERR_PTR(ret);
 	}
 
@@ -1038,7 +1038,7 @@ static int hgsl_drawobj_add_memobject(struct list_head *head,
 {
 	struct hgsl_memobj_node *mem;
 
-	mem = kmem_cache_alloc(memobjs_cache, GFP_KERNEL);
+	mem = HGSL_ZALLOC_CACHED(memobjs_cache, struct hgsl_memobj_node, GFP_KERNEL);
 	if (mem == NULL)
 		return -ENOMEM;
 
@@ -1221,37 +1221,23 @@ void hgsl_drawobjs_deinit(void)
 	}
 }
 
-int hgsl_drawobjs_init(void)
+void hgsl_drawobjs_init(void)
 {
-	int ret = 0;
-
-	memobjs_cache = KMEM_CACHE(hgsl_memobj_node, 0);
+	memobjs_cache = KMEM_CACHE(hgsl_memobj_node, SLAB_HWCACHE_ALIGN);
 	if (IS_ERR_OR_NULL(memobjs_cache)) {
-		LOGE("Failed to allocate memobjs_cache.\n");
+		LOGW("Failed to allocate memobjs_cache, falling back to kzalloc.\n");
 		memobjs_cache = NULL;
-		return -ENOMEM;
 	}
 
-	cmdobjs_cache = KMEM_CACHE(hgsl_drawobj_cmd, 0);
+	cmdobjs_cache = KMEM_CACHE(hgsl_drawobj_cmd, SLAB_HWCACHE_ALIGN);
 	if (IS_ERR_OR_NULL(cmdobjs_cache)) {
-		LOGE("Failed to allocate cmdobjs_cache.\n");
-		ret = -ENOMEM;
-		goto err;
+		LOGW("Failed to allocate cmdobjs_cache, falling back to kzalloc.\n");
+		cmdobjs_cache = NULL;
 	}
 
-	syncobjs_cache = KMEM_CACHE(hgsl_drawobj_sync, 0);
+	syncobjs_cache = KMEM_CACHE(hgsl_drawobj_sync, SLAB_HWCACHE_ALIGN);
 	if (IS_ERR_OR_NULL(syncobjs_cache)) {
-		LOGE("Failed to allocate syncobjs_cache.\n");
-		kmem_cache_destroy(cmdobjs_cache);
-		ret = -ENOMEM;
-		goto err;
+		LOGW("Failed to allocate syncobjs_cache, falling back to kzalloc.\n");
+		syncobjs_cache = NULL;
 	}
-
-	return 0;
-err:
-	kmem_cache_destroy(memobjs_cache);
-	memobjs_cache = NULL;
-	cmdobjs_cache = NULL;
-	syncobjs_cache = NULL;
-	return ret;
 }
