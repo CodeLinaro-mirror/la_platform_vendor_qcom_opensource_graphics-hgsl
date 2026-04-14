@@ -3782,20 +3782,11 @@ static int hgsl_ioctl_device_open(
 			goto out;
 		}
 
-		/*
-		 * Increment device open count only when application wants to
-		 * open with a different dev handle.
-		 */
-		if (priv->active_devicehandle != dev_handle)
-			priv->dev_open_count++;
-
-		/*
-		 * Store the active device handle when application calls
-		 * device_open for first time.
-		 */
+		/* Set active_devicehandle on first open of a new device handle. */
 		mutex_lock(&hgsl->mutex);
-		if ((priv->dev_open_count == 1) && (!priv->is_device_activated)
-				&& (priv->active_devicehandle != dev_handle))
+		if (priv->active_devicehandle != dev_handle &&
+			priv->dev_open_count++ == 0 &&
+			!priv->is_device_activated)
 			priv->active_devicehandle = dev_handle;
 		mutex_unlock(&hgsl->mutex);
 		/*
