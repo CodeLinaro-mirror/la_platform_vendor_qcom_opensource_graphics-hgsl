@@ -283,6 +283,7 @@ struct qcom_hgsl {
 	spinlock_t isync_timeline_lock;
 	atomic64_t total_mem_size;
 	struct hgsl_cache_flags cache_flags;
+	uint32_t chip_id;
 
 	struct hgsl_init_param_t ipcq_settings[HGSL_DEVICE_NUM];
 	struct hgsl_gvm_settings gvm_settings[HGSL_DEVICE_NUM];

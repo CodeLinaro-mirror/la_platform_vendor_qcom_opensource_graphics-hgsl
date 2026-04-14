@@ -972,6 +972,64 @@ out:
 	return ret;
 }
 
+int hgsl_hyp_device_getinfo(struct qcom_hgsl *hgsl, uint32_t *chip_id)
+{
+	struct device_getinfo_params_t send_params = { 0 };
+	struct device_getinfo_reply_t reply = { 0 };
+	struct hgsl_hab_channel_t *hab_channel = NULL;
+	struct gsl_hab_payload *send_buf = NULL;
+	struct gsl_hab_payload *recv_buf = NULL;
+	uint32_t dev0_handle = hgsl->device_handle[0];
+	uint32_t dev1_handle = hgsl->device_handle[1];
+	uint32_t devhandle = dev0_handle ? dev0_handle : dev1_handle;
+	int ret = 0;
+
+	RPC_TRACE();
+
+	if (!devhandle) {
+		LOGE("No valid device handle available");
+		return -ENODEV;
+	}
+
+	ret = hgsl_hyp_channel_pool_get(&hgsl->global_hyp, 0, &hab_channel);
+	if (ret) {
+		LOGE("Failed to get hab channel %d", ret);
+		goto out;
+	}
+
+	send_buf = &hab_channel->send_buf;
+	recv_buf = &hab_channel->recv_buf;
+
+	send_params.size      = sizeof(send_params);
+	send_params.devhandle = devhandle;
+
+	ret = gsl_rpc_write(send_buf, &send_params, sizeof(send_params));
+	if (ret) {
+		LOGE("gsl_rpc_write failed, %d", ret);
+		goto out;
+	}
+
+	ret = gsl_rpc_transact(RPC_DEVICE_GETINFO, hab_channel);
+	if (ret) {
+		LOGE("RPC_DEVICE_GETINFO failed, ret %d", ret);
+		goto out;
+	}
+
+	ret = gsl_rpc_read(recv_buf, &reply, sizeof(reply));
+	if (ret) {
+		LOGE("gsl_rpc_read failed, %d", ret);
+		goto out;
+	}
+
+	*chip_id = reply.chip_id;
+	LOGD("chip_id = 0x%08x", *chip_id);
+
+out:
+	hgsl_hyp_channel_pool_put(hab_channel);
+	RPC_TRACE_DONE();
+	return ret;
+}
+
 int hgsl_hyp_device_close(struct hgsl_hyp_priv_t *priv,
 		int32_t *rval, enum gsl_devhandle_t devhandle)
 {

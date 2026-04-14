@@ -53,6 +53,7 @@ enum gsl_user_mem_type_t {
 struct hgsl_cache_flags {
 	bool default_iocoherency;
 	bool writecombine_enable;
+	bool skip_cache_ops;
 };
 
 struct hgsl_mem_node_iommu_info {

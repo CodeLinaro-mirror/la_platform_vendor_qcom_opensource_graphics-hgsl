@@ -19,6 +19,11 @@
 #define pgprot_writethroughcache(_prot)	(_prot)
 #endif
 
+/* MAX_ORDER was renamed to MAX_PAGE_ORDER in kernel 6.3 */
+#ifndef MAX_PAGE_ORDER
+#define MAX_PAGE_ORDER MAX_ORDER
+#endif
+
 static DEFINE_MUTEX(hgsl_map_global_lock);
 
 static struct sg_table *hgsl_get_sgt_internal(struct hgsl_mem_node *mem_node)
@@ -564,6 +569,9 @@ int hgsl_mem_cache_op(struct device *dev, struct hgsl_mem_node *mem_node,
 	if (mem_node->flags & GSL_MEMFLAGS_PROTECTED)
 		return -EINVAL;
 
+	if (mem_node->cache_flags.skip_cache_ops)
+		return 0;
+
 	cache_mode = mem_node->flags & GSL_MEMFLAGS_CACHEMODE_MASK;
 	switch (cache_mode) {
 	case GSL_MEMFLAGS_WRITETHROUGH:
@@ -611,13 +619,17 @@ int hgsl_mem_cache_op(struct device *dev, struct hgsl_mem_node *mem_node,
 	return ret;
 }
 
-static int hgsl_alloc_pages(struct device *dev, uint32_t requested_pcount,
-				struct page **pages)
+static int hgsl_alloc_pages(uint32_t requested_pcount, struct page **pages,
+				unsigned int *hint_order)
 {
 	struct page *page = NULL;
 	unsigned int order = get_order(requested_pcount << PAGE_SHIFT);
 	uint32_t pcount = 0;
 	uint32_t i;
+
+	/* Don't retry orders higher than the last successful one. */
+	if (*hint_order < order)
+		order = *hint_order;
 
 	while (1) {
 		gfp_t gfp_mask = hgsl_gfp_mask(order);
@@ -636,9 +648,9 @@ static int hgsl_alloc_pages(struct device *dev, uint32_t requested_pcount,
 			pcount = requested_pcount;
 		for (i = 0; i < pcount; i++)
 			pages[i] = nth_page(page, i);
-		_dma_cache_op(dev, page, pcount, GSL_CACHEFLAGS_FLUSH);
 		mod_node_page_state(page_pgdat(page), NR_KERNEL_MISC_RECLAIMABLE,
 						(1 << order));
+		*hint_order = order;
 	}
 
 	return pcount;
@@ -671,6 +683,7 @@ int hgsl_sharedmem_alloc(struct device *dev, uint32_t sizebytes,
 	uint32_t requested_pcount = 0;
 	uint32_t allocated_pcount = 0;
 	uint32_t nents = 0;
+	unsigned int hint_order = MAX_PAGE_ORDER;
 	int ret = 0;
 
 	if (!sizebytes || sizebytes > U32_MAX - PAGE_SIZE) {
@@ -695,14 +708,20 @@ int hgsl_sharedmem_alloc(struct device *dev, uint32_t sizebytes,
 	while (requested_pcount > 0) {
 		uint32_t pcount;
 
-		pcount = hgsl_alloc_pages(dev, requested_pcount,
-					mem_node->pages + allocated_pcount);
+		pcount = hgsl_alloc_pages(requested_pcount,
+					mem_node->pages + allocated_pcount,
+					&hint_order);
 
 		if (pcount == 0) {
 			LOGE("Out of memory requested 0x%x, allocated 0x%x",
 				sizebytes, allocated_pcount << PAGE_SHIFT);
 			break;
 		}
+
+		if (!mem_node->cache_flags.skip_cache_ops)
+			_dma_cache_op(dev, mem_node->pages[allocated_pcount],
+					pcount, GSL_CACHEFLAGS_FLUSH);
+
 		allocated_pcount += pcount;
 		requested_pcount -= pcount;
 		nents++;
@@ -755,6 +774,7 @@ void *hgsl_mem_node_zalloc(struct hgsl_cache_flags cache_flags)
 		goto out;
 	mem_node->cache_flags.default_iocoherency = cache_flags.default_iocoherency;
 	mem_node->cache_flags.writecombine_enable = cache_flags.writecombine_enable;
+	mem_node->cache_flags.skip_cache_ops = cache_flags.skip_cache_ops;
 
 out:
 	return mem_node;
