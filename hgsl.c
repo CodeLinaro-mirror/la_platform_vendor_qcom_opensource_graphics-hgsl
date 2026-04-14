@@ -74,6 +74,15 @@
 #define DBCQ_SIGNAL_MAX DB_SIGNAL_GLOBAL_3
 #define HGSL_CLEANUP_WAIT_SLICE_IN_MS  50
 
+#define HGSL_CHIP_ID_C314  0x43030E00U
+#define HGSL_CHIP_ID_C523  0x43051700U
+
+static inline bool hgsl_is_iocoherent_gpu(uint32_t chip_id)
+{
+	return chip_id == HGSL_CHIP_ID_C314 ||
+	       chip_id == HGSL_CHIP_ID_C523;
+}
+
 #define QHDR_STATUS_INACTIVE 0x00
 #define QHDR_STATUS_ACTIVE 0x01
 
@@ -1659,9 +1668,9 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 				continue;
 			} else {
 				/*
-					* Device handle returned by BE should be according to
-					* passed device id for other values consider it as error.
-					*/
+				 * Device handle returned by BE should be according to
+				 * passed device id for other values consider it as error.
+				 */
 				if (dev_hnd != rval) {
 					LOGE("Inval dev_handle from BE rval=%d dev_id %d",
 							rval, device_id);
@@ -1685,6 +1694,9 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 			goto out;
 		}
 	}
+
+	/* Fetch chip_id: prefer GSL_HANDLE_DEV0, fall back to GSL_HANDLE_DEV1 */
+	hgsl_hyp_device_getinfo(hgsl, &hgsl->chip_id);
 
 	if (!ret_val)
 		hgsl->global_hyp_inited = true;
@@ -5306,6 +5318,16 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 							"default_iocoherency");
 	hgsl_dev->cache_flags.writecombine_enable = of_property_read_bool(pdev->dev.of_node,
 							"writecombine_enable");
+
+	/* Skip cache ops when IO coherency is enabled by default */
+	hgsl_dev->cache_flags.skip_cache_ops =
+		hgsl_dev->cache_flags.default_iocoherency &&
+		hgsl_is_iocoherent_gpu(hgsl_dev->chip_id);
+
+	LOGI("chip_id=0x%08x default_iocoherency=%d skip_cache_ops=%d",
+		hgsl_dev->chip_id,
+		hgsl_dev->cache_flags.default_iocoherency,
+		hgsl_dev->cache_flags.skip_cache_ops);
 
 	if (hgsl_dev->fv_on) {
 		for_each_matching_node(node, hgsl_component_match) {

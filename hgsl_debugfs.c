@@ -333,9 +333,9 @@ static void _hgsl_stat_show(struct seq_file *s, struct qcom_hgsl *hgsl,
 			     bool atomic)
 {
 	hgsl_debugfs_printf(s, "DEVICE INFO:\n"
-		"{ default_iocoherency=%d, db_off=%d, total_mem_size=%lld; }\n",
-		hgsl->cache_flags.default_iocoherency, hgsl->db_off,
-		atomic64_read(&hgsl->total_mem_size));
+		"{ default_iocoherency=%d, skip_cache_ops=%d, db_off=%d, total_mem_size=%lld; }\n",
+		hgsl->cache_flags.default_iocoherency, hgsl->cache_flags.skip_cache_ops,
+		hgsl->db_off, atomic64_read(&hgsl->total_mem_size));
 
 	_show_isyncs(s, hgsl);
 	_show_waiting_contexts(s, hgsl);
