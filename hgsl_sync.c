@@ -1033,3 +1033,25 @@ void hgsl_sync_fence_async_cancel(struct hgsl_sync_fence_cb *kcb)
 
 	dma_fence_remove_callback(kcb->fence, &kcb->fence_cb);
 }
+
+/**
+ * hgsl_hsync_fence_get_context - return the hgsl_context that owns a fence.
+ *
+ * Returns the context pointer if @fence was created by hgsl_hsync_fence_ops
+ * (i.e. it is an hgsl GPU-retire fence), NULL otherwise.
+ *
+ * Safe to call from softirq context: only reads immutable fields after the
+ * fence is created.
+ */
+struct hgsl_context *hgsl_hsync_fence_get_context(struct dma_fence *fence)
+{
+	struct hgsl_hsync_fence *hfence;
+	struct hgsl_hsync_timeline *timeline;
+
+	if (!fence || fence->ops != &hgsl_hsync_fence_ops)
+		return NULL;
+
+	hfence = container_of(fence, struct hgsl_hsync_fence, fence);
+	timeline = hfence->timeline;
+	return timeline ? timeline->context : NULL;
+}

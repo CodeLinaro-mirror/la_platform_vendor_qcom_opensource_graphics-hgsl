@@ -7,43 +7,91 @@
 #include <linux/debugfs.h>
 
 #include "hgsl.h"
+#include "hgsl_dispatch.h"
 #include "hgsl_debugfs.h"
 
-static void _ctxt_info_show(struct seq_file *s, struct hgsl_context *ctxt)
+/*
+ * hgsl_debugfs_printf / hgsl_debugfs_puts
+ *
+ * Output routing is determined solely by @s:
+ *   s == NULL  -> softirq / timer context: use LOGE()
+ *   s != NULL  -> process context / debugfs read: use seq_printf/seq_puts
+ *
+ * This lets _ctxt_info_show and _hgsl_stat_show share a single
+ * implementation without any intermediate buffer.
+ */
+#define hgsl_debugfs_printf(s, fmt, ...) \
+	do { \
+		if ((s) == NULL) \
+			LOGE(fmt, ##__VA_ARGS__); \
+		else \
+			seq_printf(s, fmt, ##__VA_ARGS__); \
+	} while (0)
+
+#define hgsl_debugfs_puts(s, str) \
+	do { \
+		if ((s) == NULL) \
+			LOGE("%s", str); \
+		else \
+			seq_puts(s, str); \
+	} while (0)
+
+/*
+ * _ctxt_info_show - print one context's details.
+ *
+ * @s:      seq_file to write to (ignored when atomic=true)
+ * @atomic: true  -> softirq context: use LOGW, read shadow_ts directly
+ *          false -> process context: use seq_printf, call hgsl_read_timestamp
+ */
+static void _ctxt_info_show(struct seq_file *s, struct hgsl_context *ctxt,
+			     bool atomic)
 {
 	struct doorbell_queue *dbq;
 	struct doorbell_context_queue *dbcq;
 	struct hgsl_hsync_timeline *tl;
-	uint32_t ts = 0;
+	u32 ts = 0;
 
-	/*
-	 * Contexts without a dispatcher have never submitted GPU work through
-	 * the dispatch path.  Print a compact single-line summary so they
-	 * don't clutter the output.
-	 */
 	if (!ctxt->dispatch) {
-		seq_printf(s,
-			"  ctx=[%u:%u]: { queued_ts=%u, last_ts=%u, in_destroy=%u }\n",
+		hgsl_debugfs_printf(s,
+			"  ctx=[%u:%u]: queued_ts=%u, last_ts=%u, in_destroy=%u\n",
 			ctxt->devhandle, ctxt->context_id,
 			ctxt->queued_ts, ctxt->last_ts,
 			READ_ONCE(ctxt->in_destroy));
 		return;
 	}
 
-	/* Full detail for dispatching contexts. */
-	hgsl_read_timestamp(ctxt, GSL_TIMESTAMP_RETIRED, &ts);
+	if (atomic) {
+		/* Avoid sleeping in softirq: read shadow_ts directly */
+		if (ctxt->shadow_ts)
+			ts = get_context_retired_ts(ctxt);
+	} else {
+		hgsl_read_timestamp(ctxt, GSL_TIMESTAMP_RETIRED, &ts);
+	}
 
-	seq_printf(s, "  ctx=[%u:%u]\n  {\n", ctxt->devhandle, ctxt->context_id);
-	seq_printf(s,
-		"    is_fe_shadow=%u, in_destroy=%u, ",
-		ctxt->is_fe_shadow, READ_ONCE(ctxt->in_destroy));
-	seq_printf(s,
-		"dbq_info=0x%x, flags=0x%x, tcsr_idx=%d, db_signal=%u;\n",
+	hgsl_debugfs_printf(s, "  ctx=[%u:%u] {\n",
+		ctxt->devhandle, ctxt->context_id);
+	hgsl_debugfs_printf(s,
+		"    is_fe_shadow=%u, in_destroy=%u, dbq_info=0x%x, flags=0x%x, tcsr_idx=%d, db_signal=%u;\n",
+		ctxt->is_fe_shadow, READ_ONCE(ctxt->in_destroy),
 		ctxt->dbq_info, ctxt->flags, ctxt->tcsr_idx, ctxt->db_signal);
-	seq_printf(s,
-		"    queued_ts=%u, last_ts=%u, retired_ts=%u, processed=%u;\n",
-		ctxt->queued_ts, ctxt->last_ts, ts, ctxt->event_group.processed);
-	seq_printf(s,
+	{
+		char submitted_ts_str[32];
+
+		if (list_empty(&ctxt->dispatch->drawobj_list))
+			strscpy(submitted_ts_str, "all-submitted",
+				sizeof(submitted_ts_str));
+		else
+			snprintf(submitted_ts_str, sizeof(submitted_ts_str),
+				"%u",
+				list_last_entry(&ctxt->dispatch->drawobj_list,
+					struct cmd_obj,
+					node)->drawobj->timestamp);
+		hgsl_debugfs_printf(s,
+			"    queued_ts=%u, submitted_ts=%s, last_ts=%u, retired_ts=%u, processed=%u;\n",
+			ctxt->queued_ts, submitted_ts_str,
+			ctxt->last_ts, ts, ctxt->event_group.processed);
+	}
+	hgsl_debugfs_printf(s,
 		"    drawq: head=%u, tail=%u, queued=%d, shadow_ts=%s;\n",
 		READ_ONCE(ctxt->drawq_head), READ_ONCE(ctxt->drawq_tail),
 		READ_ONCE(ctxt->queued),
@@ -51,10 +99,8 @@ static void _ctxt_info_show(struct seq_file *s, struct hgsl_context *ctxt)
 
 	dbq = ctxt->dbq;
 	if (dbq)
-		seq_printf(s,
-			"    dbq idx=%u: {\n"
-			"      state=%u, tcsr_idx=%d, ibdesc_max_size=%u, seq_num=%d;\n"
-			"    }\n",
+		hgsl_debugfs_printf(s,
+			"    dbq idx=%u: state=%u, tcsr_idx=%d, ibdesc_max_size=%u, seq_num=%d;\n",
 			dbq->dbq_idx, dbq->state, dbq->tcsr_idx,
 			dbq->ibdesc_max_size, atomic_read(&dbq->seq_num));
 
@@ -63,98 +109,110 @@ static void _ctxt_info_show(struct seq_file *s, struct hgsl_context *ctxt)
 		struct ctx_queue_header *qhdr =
 			(struct ctx_queue_header *)dbcq->queue_header;
 
-		seq_printf(s,
-			"    dbcq irq_bit_idx=%d: {\n", dbcq->irq_bit_idx);
-		seq_printf(s,
-			"      db_signal=%u, queue_size=0x%x, indirect_ib_ts=%u, ",
-			dbcq->db_signal, dbcq->queue_size, dbcq->indirect_ib_ts);
-		seq_printf(s, "seq_num=%u, dbcq_export_id=%u;\n",
+		hgsl_debugfs_printf(s,
+			"    dbcq irq_bit_idx=%d: db_signal=%u, queue_size=0x%x, indirect_ib_ts=%u, seq_num=%u, dbcq_export_id=%u;\n",
+			dbcq->irq_bit_idx,
+			dbcq->db_signal, dbcq->queue_size, dbcq->indirect_ib_ts,
 			dbcq->seq_num, ctxt->dbcq_export_id);
 		if (qhdr)
-			seq_printf(s,
-				"      rptr=%u, wptr=%u;\n",
+			hgsl_debugfs_printf(s, "    dbcq rptr=%u, wptr=%u;\n",
 				READ_ONCE(qhdr->readIdx),
 				READ_ONCE(qhdr->writeIdx));
-		seq_puts(s, "    }\n");
 	}
 
 	tl = ctxt->timeline;
 	if (tl)
-		seq_printf(s,
-			"    timeline=%s: {\n"
-			"      fcontext=0x%llx, signaled_ts=%u;\n"
-			"    }\n",
+		hgsl_debugfs_printf(s,
+			"    timeline=%s: fcontext=0x%llx, signaled_ts=%u;\n",
 			tl->name, tl->fence_context, READ_ONCE(tl->last_ts));
 
-	seq_puts(s, "  }\n");
+	hgsl_debugfs_puts(s, "  }\n");
 }
 
-static int hgsl_stat_show(struct seq_file *s, void *unused)
+/* Per-client snapshot collected in the !atomic path. */
+struct hgsl_client_info {
+	pid_t    pid;
+	int64_t  alloc_mem;
+	int64_t  mapped_mem;
+};
+
+/* Resolve pid → process name (safe in both process and softirq context). */
+static void _get_comm(pid_t pid, char *comm)
 {
-	struct qcom_hgsl *hgsl = s->private;
+	struct task_struct *task;
+
+	strscpy(comm, "<unknown>", TASK_COMM_LEN);
+	rcu_read_lock();
+	task = pid_task(find_vpid(pid), PIDTYPE_PID);
+	if (task)
+		__get_task_comm(comm, TASK_COMM_LEN, task);
+	rcu_read_unlock();
+}
+
+/* Print active isync timelines. */
+static void _show_isyncs(struct seq_file *s, struct qcom_hgsl *hgsl)
+{
 	struct hgsl_isync_timeline *cur;
-	struct hgsl_context *ctxt;
 	uint32_t idr;
-	int i = 0, found = 0, dev_hnd, p, npids = 0;
-	struct hgsl_client_info {
-		pid_t    pid;
-		int64_t  alloc_mem;
-		int64_t  mapped_mem;
-	} *clients;
-	struct hgsl_priv *priv;
-	struct hgsl_active_wait *wait;
+	int found = 0;
 
-	clients = hgsl_zalloc(HGSL_CONTEXT_NUM * sizeof(*clients));
-	if (!clients)
-		return -ENOMEM;
-
-	seq_printf(s, "DEVICE INFO:\n"
-		"{ default_iocoherency=%d, db_off=%d, total_mem_size=%lld; }\n",
-		hgsl->cache_flags.default_iocoherency, hgsl->db_off,
-		atomic64_read(&hgsl->total_mem_size));
-
-	seq_printf(s, "\n%s\n%s\n", "ACTIVE ISYNCS:", "{");
 	spin_lock(&hgsl->isync_timeline_lock);
 	idr_for_each_entry(&hgsl->isync_timeline_idr, cur, idr) {
-		seq_printf(s,
-			"    %s: { t_context=0x%llx, signaled_ts=%u, flags=0x%x, 64bit=%u; }\n",
-			cur->name, cur->context, cur->last_ts, cur->flags, cur->is64bits);
-		found = 1;
+		if (!found) {
+			hgsl_debugfs_puts(s, "ACTIVE ISYNCS:\n");
+			found = 1;
+		}
+		hgsl_debugfs_printf(s,
+			"  %s: t_context=0x%llx, signaled_ts=%u, flags=0x%x, 64bit=%u\n",
+			cur->name, cur->context, cur->last_ts,
+			cur->flags, cur->is64bits);
 	}
 	spin_unlock(&hgsl->isync_timeline_lock);
 	if (!found)
-		seq_puts(s, "  null\n");
-	seq_puts(s, "}\n");
+		hgsl_debugfs_puts(s, "ACTIVE ISYNCS: null\n");
+}
 
-	found = 0;
-	seq_printf(s, "\n%s\n%s\n", "ACTIVE WAITING CONTEXTS:", "{");
+/* Print contexts that are blocked waiting for a timestamp. */
+static void _show_waiting_contexts(struct seq_file *s,
+				    struct qcom_hgsl *hgsl)
+{
+	struct hgsl_active_wait *wait;
+	int found = 0;
+
 	spin_lock(&hgsl->active_wait_lock);
 	list_for_each_entry(wait, &hgsl->active_wait_list, head) {
-		seq_printf(s, "    { context_id=%u, wait_timestamp=%u; }\n",
+		if (!found) {
+			hgsl_debugfs_puts(s, "ACTIVE WAITING CONTEXTS:\n");
+			found = 1;
+		}
+		hgsl_debugfs_printf(s,
+			"  context_id=%u, wait_timestamp=%u\n",
 			wait->ctxt->context_id, wait->timestamp);
-		found = 1;
 	}
 	spin_unlock(&hgsl->active_wait_lock);
 	if (!found)
-		seq_puts(s, "  null\n");
-	seq_puts(s, "}\n");
+		hgsl_debugfs_puts(s, "ACTIVE WAITING CONTEXTS: null\n");
+}
 
-	/*
-	 * Collect the ordered list of active clients from hgsl->active_list.
-	 * While holding hgsl->mutex (which keeps priv alive), also snapshot
-	 * the per-client memory totals.
-	 */
+/*
+ * Collect per-client memory stats into @clients (max @max entries).
+ * Returns the number of clients found.  Must be called in process context.
+ */
+static int _collect_clients(struct qcom_hgsl *hgsl,
+			     struct hgsl_client_info *clients, int max)
+{
+	struct hgsl_priv *priv;
+	int npids = 0;
+
 	mutex_lock(&hgsl->mutex);
 	list_for_each_entry(priv, &hgsl->active_list, node) {
 		struct rb_node *rb;
 		int64_t mapped = 0;
 
-		if (npids >= HGSL_CONTEXT_NUM)
+		if (npids >= max)
 			break;
-
-		clients[npids].pid       = priv->pid;
+		clients[npids].pid      = priv->pid;
 		clients[npids].alloc_mem = atomic64_read(&priv->total_mem_size);
-
 		mutex_lock(&priv->lock);
 		for (rb = rb_first(&priv->mem_mapped); rb; rb = rb_next(rb)) {
 			struct hgsl_mem_node *mn =
@@ -162,63 +220,167 @@ static int hgsl_stat_show(struct seq_file *s, void *unused)
 			mapped += mn->memdesc.size;
 		}
 		mutex_unlock(&priv->lock);
-
 		clients[npids].mapped_mem = mapped;
 		npids++;
 	}
 	mutex_unlock(&hgsl->mutex);
+	return npids;
+}
 
-	/* Print contexts grouped by owning pid. */
-	seq_printf(s, "\n%s (%d) %s\n%s", "Total", npids, "active clients", "{");
-	for (p = 0; p < npids; p++) {
-		char comm[TASK_COMM_LEN] = "<unknown>";
-		struct task_struct *task;
-		bool header_printed = false;
+/*
+ * Print all active contexts.
+ *
+ * If @clients is available (process context, alloc succeeded): contexts are
+ * grouped by owning client with memory totals.
+ * Otherwise (atomic or alloc failure): flat list with pid/name per context.
+ */
+static void _show_contexts(struct seq_file *s, struct qcom_hgsl *hgsl,
+			    bool atomic)
+{
+	struct hgsl_client_info *clients = NULL;
+	struct hgsl_context *ctxt;
+	int i, dev_hnd;
 
-		rcu_read_lock();
-		task = pid_task(find_vpid(clients[p].pid), PIDTYPE_PID);
-		if (task)
-			get_task_comm(comm, task);
-		rcu_read_unlock();
+	if (!atomic)
+		clients = hgsl_zalloc(HGSL_CONTEXT_NUM * sizeof(*clients));
 
-		for (dev_hnd = GSL_HANDLE_DEV0; dev_hnd < (HGSL_DEVICE_NUM + 1); dev_hnd++) {
+	if (clients) {
+		int p, npids = _collect_clients(hgsl, clients, HGSL_CONTEXT_NUM);
+
+		hgsl_debugfs_printf(s, "\nTotal (%d) active clients\n{\n",
+				    npids);
+		for (p = 0; p < npids; p++) {
+			char comm[TASK_COMM_LEN];
+
+			_get_comm(clients[p].pid, comm);
+			hgsl_debugfs_printf(s,
+				"\n  client-%d-[%s]: alloc=%lld KB, mapped=%lld KB\n",
+				clients[p].pid, comm,
+				clients[p].alloc_mem >> 10,
+				clients[p].mapped_mem >> 10);
+			for (dev_hnd = GSL_HANDLE_DEV0;
+			     dev_hnd < (HGSL_DEVICE_NUM + 1); dev_hnd++) {
+				for (i = 0; i < HGSL_CONTEXT_NUM; i++) {
+					ctxt = hgsl_get_context(hgsl,
+							dev_hnd, i);
+					if (!ctxt)
+						continue;
+					if (ctxt->pid == clients[p].pid)
+						_ctxt_info_show(s, ctxt,
+								atomic);
+					hgsl_put_context(ctxt);
+				}
+			}
+		}
+		hgsl_free(clients);
+	} else {
+		hgsl_debugfs_printf(s, "\nACTIVE CONTEXTS:\n{\n");
+		for (dev_hnd = GSL_HANDLE_DEV0;
+		     dev_hnd < (HGSL_DEVICE_NUM + 1); dev_hnd++) {
 			for (i = 0; i < HGSL_CONTEXT_NUM; i++) {
+				char comm[TASK_COMM_LEN];
+
 				ctxt = hgsl_get_context(hgsl, dev_hnd, i);
 				if (!ctxt)
 					continue;
-				if (ctxt->pid != clients[p].pid) {
-					hgsl_put_context(ctxt);
-					continue;
-				}
-				if (!header_printed) {
-					seq_printf(s,
-						"\n  client-%d-[%s]: alloc=%lld KB, mapped=%lld KB\n",
-						clients[p].pid, comm,
-						clients[p].alloc_mem >> 10,
-						clients[p].mapped_mem >> 10);
-					header_printed = true;
-				}
-				_ctxt_info_show(s, ctxt);
+				_get_comm(ctxt->pid, comm);
+				hgsl_debugfs_printf(s, "  pid=%d [%s]\n",
+						    ctxt->pid, comm);
+				_ctxt_info_show(s, ctxt, atomic);
 				hgsl_put_context(ctxt);
 			}
 		}
 	}
-	seq_puts(s, "}\n");
+	hgsl_debugfs_puts(s, "}\n");
+}
 
-	hgsl_free(clients);
+/* Print contexts that are in the process of being destroyed. */
+static void _show_destroying_contexts(struct seq_file *s,
+				       struct qcom_hgsl *hgsl, bool atomic)
+{
+	struct hgsl_context *ctxt;
+	bool locked;
+	int found = 0;
 
-	mutex_lock(&hgsl->destroying_ctx_list_lock);
-	if (!list_empty(&hgsl->destroying_ctx_list)) {
-		seq_printf(s, "\n%s\n", "Destroying Context:");
-		list_for_each_entry(ctxt, &hgsl->destroying_ctx_list, node) {
-			if (!hgsl_context_get(ctxt))
-				continue;
-			_ctxt_info_show(s, ctxt);
-			hgsl_put_context(ctxt);
+	locked = atomic ? mutex_trylock(&hgsl->destroying_ctx_list_lock)
+			: (mutex_lock(&hgsl->destroying_ctx_list_lock), true);
+	if (!locked)
+		return;
+
+	list_for_each_entry(ctxt, &hgsl->destroying_ctx_list, node) {
+		if (!hgsl_context_get(ctxt))
+			continue;
+		if (!found) {
+			hgsl_debugfs_puts(s, "DESTROYING CONTEXTS:\n");
+			found = 1;
 		}
+		_ctxt_info_show(s, ctxt, atomic);
+		hgsl_put_context(ctxt);
 	}
+	if (!found)
+		hgsl_debugfs_puts(s, "DESTROYING CONTEXTS: null\n");
 	mutex_unlock(&hgsl->destroying_ctx_list_lock);
+}
 
+/*
+ * _hgsl_stat_show - common stat implementation.
+ *
+ * @s:      seq_file to write to (ignored when atomic=true)
+ * @atomic: true  -> softirq context (timer deadlock dump)
+ *          false -> process context (debugfs read)
+ */
+static void _hgsl_stat_show(struct seq_file *s, struct qcom_hgsl *hgsl,
+			     bool atomic)
+{
+	hgsl_debugfs_printf(s, "DEVICE INFO:\n"
+		"{ default_iocoherency=%d, db_off=%d, total_mem_size=%lld; }\n",
+		hgsl->cache_flags.default_iocoherency, hgsl->db_off,
+		atomic64_read(&hgsl->total_mem_size));
+
+	_show_isyncs(s, hgsl);
+	_show_waiting_contexts(s, hgsl);
+	_show_contexts(s, hgsl, atomic);
+	_show_destroying_contexts(s, hgsl, atomic);
+}
+
+/*
+ * hgsl_debugfs_dump_ctxts - dump a set of collected contexts plus the
+ * waiting and destroying context lists.
+ *
+ * Called from syncobj_timer (softirq) after all relevant contexts have been
+ * gathered.  Duplicate pointers in @ctxts are silently skipped.
+ *
+ * @ctxts:   array of context pointers to dump (may contain NULLs / dups)
+ * @nctxts:  number of entries in @ctxts
+ * @hgsl:    device whose waiting/destroying lists are also printed
+ */
+void hgsl_debugfs_dump_ctxts(struct hgsl_context **ctxts, int nctxts,
+			      struct qcom_hgsl *hgsl, bool atomic)
+{
+	int i, j;
+
+	for (i = 0; i < nctxts; i++) {
+		bool dup = false;
+
+		if (!ctxts[i])
+			continue;
+		for (j = 0; j < i; j++) {
+			if (ctxts[j] == ctxts[i]) {
+				dup = true;
+				break;
+			}
+		}
+		if (!dup)
+			_ctxt_info_show(NULL, ctxts[i], atomic);
+	}
+
+	_show_waiting_contexts(NULL, hgsl);
+	_show_destroying_contexts(NULL, hgsl, atomic);
+}
+
+static int hgsl_stat_show(struct seq_file *s, void *unused)
+{
+	_hgsl_stat_show(s, s->private, false);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(hgsl_stat);
