@@ -720,6 +720,7 @@ static inline bool hgsl_check_timestamp(struct hgsl_priv *priv,
 void hgsl_get_fence_name(struct dma_fence *f, char *name, u32 max_size);
 struct event_fence_info;
 int hgsl_fill_fence_info(struct dma_fence *fence, struct event_fence_info *info_ptr);
+struct hgsl_context *hgsl_hsync_fence_get_context(struct dma_fence *fence);
 
 /**
  * hgsl_hsync_get_name / hgsl_isync_get_name - uniform getter wrappers so
