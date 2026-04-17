@@ -1122,7 +1122,7 @@ static void hgsl_free_per_device_ipc_queues(struct qcom_hgsl *hgsl, uint32_t dev
 	if (!mem_node)
 		return;
 
-	if (mem_node->dma_buf) {
+	if (mem_node->dma_buf && mem_node->kva_map.vaddr) {
 		dma_buf_vunmap_unlocked(mem_node->dma_buf, vmap);
 		dma_buf_end_cpu_access(mem_node->dma_buf, DMA_BIDIRECTIONAL);
 		memset(vmap, 0, sizeof(struct iosys_map));
@@ -1171,7 +1171,7 @@ static int hgsl_init_ipcq_memnode(struct qcom_hgsl *hgsl, int allocate_size,
 
 err:
 	if (node) {
-		if (node->dma_buf) {
+		if (node->dma_buf && node->kva_map.vaddr) {
 			dma_buf_vunmap_unlocked(node->dma_buf,
 				&(hgsl->ipcq_memnode_vmap[dev_idx][q_type]));
 			dma_buf_end_cpu_access(node->dma_buf, DMA_BIDIRECTIONAL);
