@@ -722,4 +722,5 @@ struct hgsl_sync_fence_cb *hgsl_sync_fence_async_wait(int fd, bool (*func)(void 
 void hgsl_sync_fence_async_cancel(struct hgsl_sync_fence_cb *kcb);
 
 void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta);
+bool get_fv_status(struct qcom_hgsl *hgsl, u32 dev_id);
 #endif /* __HGSL_H_ */
