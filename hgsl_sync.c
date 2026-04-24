@@ -157,7 +157,7 @@ struct hgsl_hsync_fence *hgsl_hsync_fence_create(
 	list_add_tail(&fence->child_list, &timeline->fence_list);
 	spin_unlock_irqrestore(&timeline->lock, flags);
 
-	trace_hsync_fence_create(fence);
+	hgsl_trace(trace_hsync_fence_create, hgsl_hsync_get_name, fence, fence);
 	return fence;
 }
 
@@ -172,17 +172,20 @@ static void hgsl_hsync_timeline_signal(
 		return;
 
 	spin_lock_irqsave(&timeline->lock, flags);
-	if (hgsl_ts32_ge(timeline->last_ts, ts)) {
-		spin_unlock_irqrestore(&timeline->lock, flags);
-		goto out;
-	}
 
-	timeline->last_ts = ts;
+	/*
+	 * Advance last_ts forward only. Always scan fence_list regardless,
+	 * because a fence may be inserted after the timeline has already
+	 * passed its timestamp (GPU retires ts before userspace creates fence).
+	 */
+	if (hgsl_ts32_ge(ts, timeline->last_ts))
+		timeline->last_ts = ts;
+
 	list_for_each_entry_safe(cur, next, &timeline->fence_list,
 					child_list) {
 		if (dma_fence_is_signaled_locked(&cur->fence)) {
 			list_move_tail(&cur->child_list, &flist);
-			trace_hsync_fence_signal(cur);
+			hgsl_trace(trace_hsync_fence_signal, hgsl_hsync_get_name, cur, cur);
 		}
 	}
 	spin_unlock_irqrestore(&timeline->lock, flags);
@@ -190,7 +193,6 @@ static void hgsl_hsync_timeline_signal(
 	list_for_each_entry_safe(cur, next, &flist, child_list)
 		dma_fence_put(&cur->fence);
 
-out:
 	hgsl_hsync_timeline_put(timeline);
 }
 
@@ -288,7 +290,8 @@ static bool hgsl_hsync_has_signaled(struct dma_fence *base)
 			container_of(base, struct hgsl_hsync_fence, fence);
 	struct hgsl_hsync_timeline *timeline = fence->timeline;
 
-	return hgsl_ts32_ge(timeline->last_ts, fence->ts);
+	/* last_ts may be read without timeline->lock (e.g. dma_fence_is_signaled) */
+	return hgsl_ts32_ge(READ_ONCE(timeline->last_ts), fence->ts);
 }
 
 static void hgsl_hsync_fence_release(struct dma_fence *base)
@@ -299,11 +302,14 @@ static void hgsl_hsync_fence_release(struct dma_fence *base)
 
 	if (timeline) {
 		if (WARN_ON(unlikely(!dma_fence_is_signaled(base))))
-			trace_hsync_fence_release_unsignal(fence);
+			hgsl_trace(trace_hsync_fence_release_unsignal,
+				hgsl_hsync_get_name, fence, fence);
+		else
+			hgsl_trace(trace_hsync_fence_release,
+				hgsl_hsync_get_name, fence, fence);
 		hgsl_hsync_timeline_put(timeline);
 	}
 
-	trace_hsync_fence_release(fence);
 	dma_fence_free(base);
 }
 
@@ -487,7 +493,8 @@ int hgsl_isync_fence_create(struct hgsl_priv *priv, uint32_t timeline_id,
 	if (!dma_fence_is_signaled(&fence->fence)) {
 		spin_lock(&timeline->fence_list_lock);
 		list_add_tail(&fence->child_list, &timeline->fence_list);
-		trace_isync_fence_alloc(timeline->id, fence->ts);
+		hgsl_trace(trace_isync_fence_alloc, hgsl_isync_get_name,
+			fence, timeline->id, fence->ts);
 		spin_unlock(&timeline->fence_list_lock);
 	}
 
@@ -901,7 +908,8 @@ static void hgsl_isync_fence_release(struct dma_fence *base)
 		}
 		spin_unlock(&timeline->fence_list_lock);
 
-		trace_isync_fence_release(timeline->id, fence->ts);
+		hgsl_trace(trace_isync_fence_release, hgsl_isync_get_name,
+			fence, timeline->id, fence->ts);
 		hgsl_isync_timeline_put(fence->timeline);
 	}
 
@@ -928,28 +936,22 @@ static const struct dma_fence_ops hgsl_isync_fence_ops = {
 void hgsl_get_fence_name(struct dma_fence *f,
 	char *name, u32 max_size)
 {
-	int len = scnprintf(name, max_size, "%p %s %s",
-			f, f->ops->get_driver_name(f),
-			f->ops->get_timeline_name(f));
-
-	if (f->ops->fence_value_str) {
-		len += scnprintf(name + len, max_size - len, ": ");
-		f->ops->fence_value_str(f, name + len, max_size - len);
-	}
+	scnprintf(name, max_size, "%s:%s seqno=%llu",
+		f->ops->get_driver_name(f),
+		f->ops->get_timeline_name(f),
+		(u64)f->seqno);
 }
 
-void hgsl_get_fence_info(struct hgsl_drawobj_sync_event *event)
+int hgsl_fill_fence_info(struct dma_fence *fence,
+	struct event_fence_info *info_ptr)
 {
 	u32 num_fences;
-	struct dma_fence *fence, **fences;
+	struct dma_fence **fences;
 	struct dma_fence_array *array;
-	struct event_fence_info *info_ptr = event->priv;
 	int i;
 
-	if (!event || !event->handle)
-		return;
-
-	fence = event->handle->fence;
+	if (!fence || !info_ptr)
+		return -EINVAL;
 
 	array = to_dma_fence_array(fence);
 	if (array != NULL) {
@@ -960,14 +962,10 @@ void hgsl_get_fence_info(struct hgsl_drawobj_sync_event *event)
 		fences = &fence;
 	}
 
-	info_ptr = event->priv;
-	if (!info_ptr)
-		return;
-
 	info_ptr->fences = kcalloc(num_fences, sizeof(struct fence_info),
 			GFP_KERNEL);
 	if (info_ptr->fences == NULL)
-		return;
+		return -ENOMEM;
 
 	info_ptr->num_fences = num_fences;
 
@@ -977,6 +975,8 @@ void hgsl_get_fence_info(struct hgsl_drawobj_sync_event *event)
 
 		hgsl_get_fence_name(f, fi->name, sizeof(fi->name));
 	}
+
+	return 0;
 }
 
 static void hgsl_sync_fence_callback(struct dma_fence *fence,
@@ -1032,4 +1032,26 @@ void hgsl_sync_fence_async_cancel(struct hgsl_sync_fence_cb *kcb)
 		return;
 
 	dma_fence_remove_callback(kcb->fence, &kcb->fence_cb);
+}
+
+/**
+ * hgsl_hsync_fence_get_context - return the hgsl_context that owns a fence.
+ *
+ * Returns the context pointer if @fence was created by hgsl_hsync_fence_ops
+ * (i.e. it is an hgsl GPU-retire fence), NULL otherwise.
+ *
+ * Safe to call from softirq context: only reads immutable fields after the
+ * fence is created.
+ */
+struct hgsl_context *hgsl_hsync_fence_get_context(struct dma_fence *fence)
+{
+	struct hgsl_hsync_fence *hfence;
+	struct hgsl_hsync_timeline *timeline;
+
+	if (!fence || fence->ops != &hgsl_hsync_fence_ops)
+		return NULL;
+
+	hfence = container_of(fence, struct hgsl_hsync_fence, fence);
+	timeline = hfence->timeline;
+	return timeline ? timeline->context : NULL;
 }

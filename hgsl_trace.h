@@ -18,10 +18,11 @@
 #include "hgsl_drawobj.h"
 
 DECLARE_EVENT_CLASS(hgsl_hsync_class,
-	TP_PROTO(struct hgsl_hsync_fence *hsync),
-	TP_ARGS(hsync),
+	TP_PROTO(struct hgsl_hsync_fence *hsync, char *fence_name),
+	TP_ARGS(hsync, fence_name),
 	TP_STRUCT__entry(
 		__string(tl_name, hsync->timeline->name)
+		__string(fence_name, fence_name)
 		__field(u32, devhandle)
 		__field(u32, context_id)
 		__field(u32, ts)
@@ -29,35 +30,37 @@ DECLARE_EVENT_CLASS(hgsl_hsync_class,
 	),
 	TP_fast_assign(
 		__assign_str(tl_name);
+		__assign_str(fence_name);
 		__entry->devhandle = hsync->timeline->context->devhandle;
 		__entry->context_id = hsync->timeline->context->context_id;
 		__entry->ts = hsync->ts;
 		__entry->last_ts = hsync->timeline->last_ts;
 	),
-	TP_printk("ctx=[%u:%u] ts=%u last_ts=%u timeline=%s",
+	TP_printk("ctx=[%u:%u] ts=%u last_ts=%u timeline=%s fence=%s",
 			__entry->devhandle, __entry->context_id,
-			__entry->ts, __entry->last_ts, __get_str(tl_name)
+			__entry->ts, __entry->last_ts, __get_str(tl_name),
+			__get_str(fence_name)
 	)
 );
 
 DEFINE_EVENT(hgsl_hsync_class, hsync_fence_create,
-	TP_PROTO(struct hgsl_hsync_fence *hsync),
-	TP_ARGS(hsync)
+	TP_PROTO(struct hgsl_hsync_fence *hsync, char *fence_name),
+	TP_ARGS(hsync, fence_name)
 );
 
 DEFINE_EVENT(hgsl_hsync_class, hsync_fence_signal,
-	TP_PROTO(struct hgsl_hsync_fence *hsync),
-	TP_ARGS(hsync)
+	TP_PROTO(struct hgsl_hsync_fence *hsync, char *fence_name),
+	TP_ARGS(hsync, fence_name)
 );
 
 DEFINE_EVENT(hgsl_hsync_class, hsync_fence_release_unsignal,
-	TP_PROTO(struct hgsl_hsync_fence *hsync),
-	TP_ARGS(hsync)
+	TP_PROTO(struct hgsl_hsync_fence *hsync, char *fence_name),
+	TP_ARGS(hsync, fence_name)
 );
 
 DEFINE_EVENT(hgsl_hsync_class, hsync_fence_release,
-	TP_PROTO(struct hgsl_hsync_fence *hsync),
-	TP_ARGS(hsync)
+	TP_PROTO(struct hgsl_hsync_fence *hsync, char *fence_name),
+	TP_ARGS(hsync, fence_name)
 );
 
 TRACE_EVENT(isync_release,
@@ -104,14 +107,32 @@ DEFINE_EVENT(hgsl_isync_class, isync_signal,
 	TP_ARGS(timeline_id, timestamp)
 );
 
-DEFINE_EVENT(hgsl_isync_class, isync_fence_alloc,
-	TP_PROTO(u32 timeline_id, u64 timestamp),
-	TP_ARGS(timeline_id, timestamp)
+DECLARE_EVENT_CLASS(hgsl_isync_fence_class,
+	TP_PROTO(u32 timeline_id, u64 timestamp, char *fence_name),
+	TP_ARGS(timeline_id, timestamp, fence_name),
+	TP_STRUCT__entry(
+		__field(u32, timeline_id)
+		__field(u64, timestamp)
+		__string(fence_name, fence_name)
+	),
+	TP_fast_assign(
+		__entry->timeline_id = timeline_id;
+		__entry->timestamp = timestamp;
+		__assign_str(fence_name);
+	),
+	TP_printk("timeline_id=%u ts=%llu fence=%s",
+		__entry->timeline_id, __entry->timestamp, __get_str(fence_name)
+	)
 );
 
-DEFINE_EVENT(hgsl_isync_class, isync_fence_release,
-	TP_PROTO(u32 timeline_id, u64 timestamp),
-	TP_ARGS(timeline_id, timestamp)
+DEFINE_EVENT(hgsl_isync_fence_class, isync_fence_alloc,
+	TP_PROTO(u32 timeline_id, u64 timestamp, char *fence_name),
+	TP_ARGS(timeline_id, timestamp, fence_name)
+);
+
+DEFINE_EVENT(hgsl_isync_fence_class, isync_fence_release,
+	TP_PROTO(u32 timeline_id, u64 timestamp, char *fence_name),
+	TP_ARGS(timeline_id, timestamp, fence_name)
 );
 
 TRACE_EVENT(drawobj_timeline,
@@ -138,6 +159,8 @@ TRACE_EVENT(drawobj_queued,
 	TP_STRUCT__entry(
 		__field(u32, devhandle)
 		__field(u32, context_id)
+		__field(u32, drawq_head)
+		__field(u32, drawq_tail)
 		__field(u32, refcount)
 		__field(u32, timestamp)
 		__field(u32, queued)
@@ -146,14 +169,17 @@ TRACE_EVENT(drawobj_queued,
 	TP_fast_assign(
 		__entry->devhandle = drawobj->context->devhandle;
 		__entry->context_id = drawobj->context->context_id;
+		__entry->drawq_head = drawobj->context->drawq_head;
+		__entry->drawq_tail = drawobj->context->drawq_tail;
 		__entry->refcount = kref_read(&drawobj->context->kref);
 		__entry->timestamp = drawobj->timestamp;
 		__entry->queued = queued;
 		__entry->flags = drawobj->flags;
 	),
-	TP_printk("ctx=[%u:%u] refcount=%u ts=%u queued=%u flags=%s",
-			__entry->devhandle, __entry->context_id,
-			__entry->refcount, __entry->timestamp, __entry->queued,
+	TP_printk("ctx=[%u:%u] drawq[%u-%u] refcount=%u ts=%u queued=%u flags=%s",
+			__entry->devhandle, __entry->context_id, __entry->drawq_head,
+			__entry->drawq_tail, __entry->refcount, __entry->timestamp,
+			__entry->queued,
 			__entry->flags ? __print_flags(
 						__entry->flags, "|",
 						{ HGSL_DRAWOBJ_MARKER, "MARKER" },
@@ -171,6 +197,8 @@ DECLARE_EVENT_CLASS(hgsl_drawobj_class,
 	TP_STRUCT__entry(
 		__field(u32, devhandle)
 		__field(u32, context_id)
+		__field(u32, drawq_head)
+		__field(u32, drawq_tail)
 		__field(u32, refcount)
 		__field(u32, type)
 		__field(u32, timestamp)
@@ -178,14 +206,16 @@ DECLARE_EVENT_CLASS(hgsl_drawobj_class,
 	TP_fast_assign(
 		__entry->devhandle = drawobj->context->devhandle;
 		__entry->context_id = drawobj->context->context_id;
+		__entry->drawq_head = drawobj->context->drawq_head;
+		__entry->drawq_tail = drawobj->context->drawq_tail;
 		__entry->refcount = kref_read(&drawobj->context->kref);
 		__entry->type = drawobj->type;
 		__entry->timestamp = drawobj->timestamp;
 	),
-	TP_printk("ctx=[%u:%u] refcount=%u type=%u timestamp=%u",
-		__entry->devhandle, __entry->context_id,
-		__entry->refcount, __entry->type,
-		__entry->timestamp)
+	TP_printk("ctx=[%u:%u] drawq[%u-%u] refcount=%u timestamp=%u",
+		__entry->devhandle, __entry->context_id, __entry->drawq_head,
+		__entry->drawq_tail, __entry->refcount, __entry->type,
+        __entry->timestamp)
 );
 
 DEFINE_EVENT(hgsl_drawobj_class, drawobj_submitted,
@@ -204,35 +234,42 @@ DEFINE_EVENT(hgsl_drawobj_class, drawobj_destroy,
 );
 
 DECLARE_EVENT_CLASS(hgsl_syncobj_class,
-	TP_PROTO(struct hgsl_drawobj_sync *syncobj),
-	TP_ARGS(syncobj),
+	TP_PROTO(struct hgsl_drawobj_sync *syncobj, char *fence_names),
+	TP_ARGS(syncobj, fence_names),
 	TP_STRUCT__entry(
 		__field(u32, devhandle)
 		__field(u32, context_id)
+		__field(u32, drawq_head)
+		__field(u32, drawq_tail)
 		__field(u32, refcount)
 		__field(u32, numsyncs)
 		__field(uintptr_t, syncobj)
+		__string(fence_names, fence_names)
 	),
 	TP_fast_assign(
 		__entry->devhandle = syncobj->base.context->devhandle;
 		__entry->context_id = syncobj->base.context->context_id;
+		__entry->drawq_head = syncobj->base.context->drawq_head;
+		__entry->drawq_tail = syncobj->base.context->drawq_tail;
 		__entry->refcount = kref_read(&syncobj->base.context->kref);
 		__entry->numsyncs = syncobj->numsyncs;
 		__entry->syncobj = (uintptr_t)syncobj;
+		__assign_str(fence_names);
 	),
-	TP_printk("ctx=[%u:%u] refcount=%u numsyncs=%u syncobj=0x%llx",
-		__entry->devhandle, __entry->context_id,
-		__entry->refcount, __entry->numsyncs, __entry->syncobj)
+	TP_printk("ctx=[%u:%u] drawq[%u-%u] refcount=%u numsyncs=%u syncobj=0x%llx fence_names=%s",
+		__entry->devhandle, __entry->context_id, __entry->drawq_head,
+		__entry->drawq_tail, __entry->refcount, __entry->numsyncs,
+		__entry->syncobj, __get_str(fence_names))
 );
 
 DEFINE_EVENT(hgsl_syncobj_class, syncobj_queued,
-	TP_PROTO(struct hgsl_drawobj_sync *syncobj),
-	TP_ARGS(syncobj)
+	TP_PROTO(struct hgsl_drawobj_sync *syncobj, char *fence_names),
+	TP_ARGS(syncobj, fence_names)
 );
 
 DEFINE_EVENT(hgsl_syncobj_class, syncobj_retired,
-	TP_PROTO(struct hgsl_drawobj_sync *syncobj),
-	TP_ARGS(syncobj)
+	TP_PROTO(struct hgsl_drawobj_sync *syncobj, char *fence_names),
+	TP_ARGS(syncobj, fence_names)
 );
 
 DECLARE_EVENT_CLASS(syncpoint_timestamp_class,
@@ -281,15 +318,17 @@ DECLARE_EVENT_CLASS(syncpoint_fence_class,
 		__string(fence_name, name)
 		__field(u32, syncobj_devhandle)
 		__field(u32, syncobj_context_id)
+		__field(uintptr_t, syncobj)
 	),
 	TP_fast_assign(
 		__entry->syncobj_devhandle = syncobj->base.context->devhandle;
 		__entry->syncobj_context_id = syncobj->base.context->context_id;
+		__entry->syncobj = (uintptr_t)syncobj;
 		__assign_str(fence_name);
 	),
-	TP_printk("ctx=[%u:%u] fence=%s",
+	TP_printk("ctx=[%u:%u] syncobj=0x%llx fence=%s",
 		__entry->syncobj_devhandle, __entry->syncobj_context_id,
-		__get_str(fence_name))
+		__entry->syncobj, __get_str(fence_name))
 );
 
 DEFINE_EVENT(syncpoint_fence_class, syncpoint_fence,

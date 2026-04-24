@@ -766,7 +766,11 @@ int hgsl_hyp_init(struct hgsl_hyp_priv_t *priv, struct device *dev,
 
 void hgsl_hyp_close(struct hgsl_hyp_priv_t *priv)
 {
-	hgsl_hyp_channel_pool_close(priv);
+	if (priv->dev) {
+		hgsl_hyp_channel_pool_close(priv);
+	} else {
+		LOGE("Invalid private data, can't close channel pool");
+	}
 }
 
 int hgsl_hyp_generic_transaction(struct hgsl_hyp_priv_t *priv,

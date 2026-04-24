@@ -146,20 +146,6 @@ enum HGSL_DBQ_IBDESC_WAIT_TYPE {
 #define HGSL_CTXT_QUEUE_TOTAL_SIZE           PAGE_ALIGN(HGSL_CTXT_QUEUE_INDIRECT_IB_SIZE +\
 							HGSL_CTXT_QUEUE_INDIRECT_IB_OFFSET)
 
-struct ctx_queue_header {
-	uint32_t version;             // Version of the context queue header
-	uint32_t startAddr;           // GMU VA of start of queue
-	uint32_t dwSize;              // Queue size in dwords
-	uint32_t outFenceTs; // Timestamp of the last output hardware fence sent to TxQueue
-	uint32_t syncObjTs;  // Timestamp of last SYNC object that has been signaled
-	uint32_t readIdx;    // Read index of the queue
-	uint32_t writeIdx;   // Write index of the queue
-	uint32_t hwFenceArrayAddr;    // GMU VA of the buffer to store output hardware fences
-	uint32_t hwFenceArraySize;    // Size(bytes) of the buffer to store output hardware fences
-	uint32_t dbqSignal;
-	uint32_t unused0;
-	uint32_t unused1;
-};
 
 static void _signal_contexts(struct qcom_hgsl *hgsl, u32 dev_hnd);
 
@@ -1623,8 +1609,6 @@ static void hgsl_close_global_hyp_and_gsl_lib(struct qcom_hgsl *hgsl)
 
 	if (hgsl->global_hyp_inited) {
 		(void)hgsl_hyp_lib_close(&hgsl->global_hyp, 0, &rval);
-		if (rval)
-			LOGW("hgsl_hyp_lib_close() failed");
 		hgsl->global_hyp_inited = false;
 	}
 
@@ -1652,11 +1636,10 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 		ret_val = hgsl_hyp_lib_open(&hgsl->global_hyp, 0, &rval);
 	} while (ret_val == -EAGAIN && retry_count--);
 
-	if (rval) {
-		LOGE("hgsl_hyp_lib_open() failed with ret_val %d retry_count %u",
-				ret_val, retry_count);
+	if (ret_val || rval) {
+		LOGE("hgsl_hyp_lib_open() failed with ret_val %d rval %d retry_count %u",
+				ret_val, rval, retry_count);
 		ret_val = -EINVAL;
-		hgsl_hyp_close(&hgsl->global_hyp);
 		goto out;
 	}
 
@@ -1698,7 +1681,6 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 		 */
 		if (ret[GSL_HANDLE_DEV0 - 1] && ret[GSL_HANDLE_DEV1 - 1]) {
 			LOGE("Failed for both GPU device handles");
-			hgsl_close_global_hyp_and_gsl_lib(hgsl);
 			ret_val = -EINVAL;
 			goto out;
 		}
@@ -1845,7 +1827,7 @@ static inline void _destroy_context(struct kref *kref)
 	/* ensure update dbq metadata is done */
 	dma_wmb();
 
-	ctxt->destroyed = true;
+	WRITE_ONCE(ctxt->destroyed, true);
 }
 
 struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
@@ -1862,8 +1844,8 @@ struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
 	if (context_id < HGSL_CONTEXT_NUM) {
 		read_lock(&hgsl->ctxt_lock);
 		ctxt = hgsl->contexts[dev_id][context_id];
-		if (ctxt)
-			kref_get(&ctxt->kref);
+		if (ctxt && !kref_get_unless_zero(&ctxt->kref))
+			ctxt = NULL;
 		read_unlock(&hgsl->ctxt_lock);
 	}
 
@@ -2252,7 +2234,7 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	}
 
 	/* unblock all waiting threads on this context */
-	ctxt->in_destroy = true;
+	WRITE_ONCE(ctxt->in_destroy, true);
 
 	/* Make sure all pending events are processed or cancelled */
 	hgsl_ctxt_detach_drawobjs(hgsl, ctxt);
@@ -2260,7 +2242,7 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	wake_up_all(&ctxt->wait_q);
 	hgsl_put_context(ctxt);
 
-	while (!ctxt->destroyed)
+	while (!READ_ONCE(ctxt->destroyed))
 		cpu_relax();
 
 	mutex_lock(&hgsl->destroying_ctx_list_lock);
@@ -2393,7 +2375,7 @@ static int hgsl_ioctl_ctxt_create(
 	init_waitqueue_head(&ctxt->wait_q);
 	mutex_init(&ctxt->lock);
 
-	spin_lock_init(&ctxt->drawq_lock);
+	rt_mutex_init(&ctxt->drawq_lock);
 	init_waitqueue_head(&ctxt->drawq_wq);
 	rt_mutex_init(&ctxt->dispatch_lock);
 	hgsl_add_event_group(hgsl, &ctxt->event_group, ctxt, hgsl_read_timestamp,
@@ -2508,7 +2490,7 @@ static int hgsl_wait_timestamp(struct qcom_hgsl *hgsl,
 
 	ret = wait_event_interruptible_timeout(ctxt->wait_q,
 				_timestamp_retired(ctxt, timestamp) ||
-						ctxt->in_destroy,
+						READ_ONCE(ctxt->in_destroy),
 				msecs_to_jiffies(param->timeout));
 	if (ret == 0)
 		ret = -ETIMEDOUT;
@@ -2998,7 +2980,7 @@ static int hgsl_ioctl_mem_map_smmu(
 out:
 	if (ret) {
 		if (use_fv && (!(params->flags & GSL_MEMFLAGS_PROTECTED)) &&
-							(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+			(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
 			hgsl_mmu_unmap(hgsl, pt, mem_node, false, priv->active_devicehandle);
 			hgsl_mmu_put_gpuaddr(pt, mem_node, hgsl->use_single_pt);
 		} else
@@ -3537,8 +3519,6 @@ int hgsl_read_timestamp(struct hgsl_context *ctxt,
 		return -ENOENT;
 
 	ret = get_context_shadow_ts(ctxt, type, timestamp);
-	hgsl_put_context(ctxt);
-
 	if (ret) {
 		param.devhandle = ctxt->devhandle;
 		param.ctxthandle = ctxt->context_id;
@@ -3546,6 +3526,7 @@ int hgsl_read_timestamp(struct hgsl_context *ctxt,
 		ret = hgsl_hyp_read_timestamp(&ctxt->priv->hyp_priv, &param);
 		*timestamp = param.timestamp;
 	}
+	hgsl_put_context(ctxt);
 
 	return ret;
 }
@@ -3913,20 +3894,11 @@ static int hgsl_ioctl_device_open(
 			goto out;
 		}
 
-		/*
-		 * Increment device open count only when application wants to
-		 * open with a different dev handle.
-		 */
-		if (priv->active_devicehandle != dev_handle)
-			priv->dev_open_count++;
-
-		/*
-		 * Store the active device handle when application calls
-		 * device_open for first time.
-		 */
+		/* Set active_devicehandle on first open of a new device handle. */
 		mutex_lock(&hgsl->mutex);
-		if ((priv->dev_open_count == 1) && (!priv->is_device_activated)
-				&& (priv->active_devicehandle != dev_handle))
+		if (priv->active_devicehandle != dev_handle &&
+			priv->dev_open_count++ == 0 &&
+			!priv->is_device_activated)
 			priv->active_devicehandle = dev_handle;
 		mutex_unlock(&hgsl->mutex);
 		/*
@@ -4083,7 +4055,9 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 	pt = hgsl_get_ctxt_pagetable(priv);
 	while (next) {
 		node_found = rb_entry(next, struct hgsl_mem_node, mem_rb_node);
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE) {
 			ret = hgsl_mmu_unmap(hgsl, pt, node_found, false,
 							priv->active_devicehandle);
 		} else {
@@ -4095,7 +4069,9 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 				node_found->export_id, node_found->memdesc.gpuaddr, ret);
 
 		// For full virtualization release GPU address back if FE unmapping is successful.
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)
 			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
 		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
 
@@ -4107,7 +4083,9 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 	next = rb_first(&priv->mem_allocated);
 	while (next) {
 		node_found = rb_entry(next, struct hgsl_mem_node, mem_rb_node);
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE) {
 			// Single pagetable TTBR0 will be used for both the GPU SMMU context banks
 			ret = hgsl_mmu_unmap(hgsl, pt, node_found, true, priv->active_devicehandle);
 		} else
@@ -4118,7 +4096,9 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 							node_found->export_id, node_found->memdesc.gpuaddr, ret);
 
 		// For full virtualization release GPU address back if FE unmapping is successful.
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
 			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
 		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
 
@@ -5229,6 +5209,7 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	platform_set_drvdata(pdev, hgsl_dev);
 	ret = hgsl_init_context(hgsl_dev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "hgsl_init_context failed, ret %d\n",
@@ -5272,8 +5253,6 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 		LOGE("hgsl_init_global_hyp_channel() failed with ret=%d", ret);
 		goto exit_dereg;
 	}
-
-	platform_set_drvdata(pdev, hgsl_dev);
 
 	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
 		// Init GMUGOS only for the opened device
@@ -5361,9 +5340,6 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 	return 0;
 
 exit_dereg:
-	if (dev_get_drvdata(&pdev->dev) == hgsl_dev)
-		dev_set_drvdata(&pdev->dev, NULL);
-
 	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
 		if (hgsl_dev->device_handle[i] != 0) {
 			struct hgsl_gmugos *gmugos = &hgsl_dev->gmugos[i];
@@ -5378,6 +5354,8 @@ exit_dereg:
 
 	hgsl_close_gsl_device_lib(hgsl_dev);
 	qcom_hgsl_deregister(pdev);
+	if (dev_get_drvdata(&pdev->dev) == hgsl_dev)
+		dev_set_drvdata(&pdev->dev, NULL);
 	return ret;
 }
 
@@ -5387,6 +5365,9 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 	struct hgsl_tcsr *tcsr_sender, *tcsr_receiver;
 	struct hgsl_gmugos *gmugos;
 	int i, j;
+
+	if (!hgsl)
+		goto out;
 
 	hgsl_dispatch_deinit(hgsl);
 
@@ -5442,6 +5423,8 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 
 	mutex_destroy(&hgsl->mutex);
 	qcom_hgsl_deregister(pdev);
+
+out:
 	return 0;
 }
 

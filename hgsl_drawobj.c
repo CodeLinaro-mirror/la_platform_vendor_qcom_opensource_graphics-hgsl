@@ -9,6 +9,7 @@
 #include "hgsl.h"
 #include "hgsl_drawobj.h"
 #include "hgsl_dispatch.h"
+#include "hgsl_debugfs.h"
 #include "hgsl_trace.h"
 
 /*
@@ -98,6 +99,9 @@ static void syncobj_timer(struct timer_list *t)
 	struct hgsl_drawobj *drawobj;
 	struct hgsl_drawobj_sync_event *event;
 	struct hgsl_context *ctxt;
+	/* +1 for the deadlocked context itself */
+	struct hgsl_context *dump_ctxts[HGSL_MAX_SYNCPOINTS + 1];
+	int ndump = 0;
 	unsigned int i;
 	u32 rts = 0;
 
@@ -117,6 +121,7 @@ static void syncobj_timer(struct timer_list *t)
 	LOGE("hgsl: possible gpu syncpoint deadlock for context %u timestamp %u retired %u queued %u\n",
 		ctxt->context_id, drawobj->timestamp, rts, ctxt->queued_ts);
 	LOGE("      pending events:\n");
+
 	for (i = 0; i < syncobj->numsyncs; i++) {
 		event = &syncobj->synclist[i];
 
@@ -127,14 +132,37 @@ static void syncobj_timer(struct timer_list *t)
 		case HGSL_CMD_SYNCPOINT_TYPE_TIMESTAMP:
 			LOGE("       [%u] TIMESTAMP %u:%u\n",
 				i, event->context->context_id, event->timestamp);
+			if (ndump < ARRAY_SIZE(dump_ctxts))
+				dump_ctxts[ndump++] = event->context;
 			break;
 		case HGSL_CMD_SYNCPOINT_TYPE_FENCE: {
 			int j;
 			struct event_fence_info *info = event->priv;
+			struct hgsl_sync_fence_cb *kcb = event->handle;
 
 			for (j = 0; info && j < info->num_fences; j++)
 				LOGE("       [%u] FENCE %s\n",
 					i, info->fences[j].name);
+
+			/* Collect the hgsl context that owns the fence */
+			if (kcb && kcb->fence) {
+				struct dma_fence *f = kcb->fence;
+				struct dma_fence_array *arr =
+					to_dma_fence_array(f);
+				struct dma_fence **fences =
+					arr ? arr->fences : &f;
+				int nf = arr ? (int)arr->num_fences : 1;
+				int k;
+
+				for (k = 0; k < nf &&
+				     ndump < ARRAY_SIZE(dump_ctxts); k++) {
+					struct hgsl_context *fence_ctxt =
+						hgsl_hsync_fence_get_context(
+							fences[k]);
+					if (fence_ctxt)
+						dump_ctxts[ndump++] = fence_ctxt;
+				}
+			}
 			break;
 		}
 		case HGSL_CMD_SYNCPOINT_TYPE_TIMELINE: {
@@ -155,8 +183,7 @@ static void syncobj_timer(struct timer_list *t)
 				str = "signaled";
 			else if (retired && !signaled)
 				str = "retired but not signaled";
-			LOGE("       [%u] FENCE %s\n",
-				i, str);
+			LOGE("       [%u] FENCE %s\n", i, str);
 			for (j = 0; info && info[j].timeline; j++)
 				LOGE("       TIMELINE %d SEQNO %lld\n",
 					info[j].timeline, info[j].seqno);
@@ -164,6 +191,13 @@ static void syncobj_timer(struct timer_list *t)
 		}
 		}
 	}
+
+	/* Always include the deadlocked context itself */
+	if (ndump < ARRAY_SIZE(dump_ctxts))
+		dump_ctxts[ndump++] = ctxt;
+
+	/* Dump all collected contexts + waiting + destroying contexts */
+	hgsl_debugfs_dump_ctxts(dump_ctxts, ndump, ctxt->priv->dev, true);
 
 	hgsl_drawobj_put(drawobj);
 	LOGE("--gpu syncpoint deadlock print end--\n");
@@ -260,11 +294,17 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 	if (WARN_ON(!hgsl_context_get(ctxt)))
 		return;
 
+	/* Early return if no dispatch context */
+	if (!ctxt->dispatch) {
+		hgsl_put_context(ctxt);
+		return;
+	}
+
 	wake_up_all(&ctxt->drawq_wq);
 	trace_ctxt_detach_drawobjs(ctxt);
 
 	hgsl_flush_event_group(hgsl, &ctxt->event_group);
-	spin_lock(&ctxt->drawq_lock);
+	rt_mutex_lock(&ctxt->drawq_lock);
 	while (ctxt->drawq_head != ctxt->drawq_tail) {
 		struct hgsl_drawobj *drawobj =
 			ctxt->drawq[ctxt->drawq_head];
@@ -274,7 +314,7 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 
 		list[count++] = drawobj;
 	}
-	spin_unlock(&ctxt->drawq_lock);
+	rt_mutex_unlock(&ctxt->drawq_lock);
 
 	for (i = 0; i < count; i++) {
 		hgsl_cancel_events_timestamp(hgsl, &ctxt->event_group,
@@ -282,11 +322,9 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 		hgsl_drawobj_destroy(list[i]);
 	}
 
-	if (ctxt->dispatch) {
-		hgsl_dispatch_ctxt_schedule(ctxt);
-		kthread_flush_worker(ctxt->dispatch->worker);
-		hgsl_reclaim_drawobjs(ctxt);
-	}
+	hgsl_dispatch_queue_context(ctxt);
+	kthread_flush_worker(ctxt->dispatch->worker);
+	hgsl_reclaim_drawobjs(ctxt);
 	hgsl_put_context(ctxt);
 }
 
@@ -294,6 +332,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 {
 	struct hgsl_drawobj_sync *syncobj = SYNCOBJ(drawobj);
 	unsigned int i;
+	bool cancelled = false;
 
 	/* Zap the canary timer */
 	del_timer_sync(&syncobj->timer);
@@ -302,7 +341,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 	 * Clear all pending events - this will render any subsequent async
 	 * callbacks harmless
 	 */
-	for (i = 0; i < syncobj->numsyncs; i++) {
+	for (i = 0; i < syncobj->numsyncs && i < HGSL_MAX_SYNCPOINTS; i++) {
 		struct hgsl_drawobj_sync_event *event = &syncobj->synclist[i];
 
 		/*
@@ -313,6 +352,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 		if (!test_and_clear_bit(i, &syncobj->pending))
 			continue;
 
+		cancelled = true;
 		switch (event->type) {
 		case HGSL_CMD_SYNCPOINT_TYPE_TIMESTAMP:
 			hgsl_cancel_event(drawobj->priv->dev,
@@ -340,7 +380,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 	 * If we cancelled an event, there's a good chance that the context is
 	 * on a dispatcher queue, so schedule to get it removed.
 	 */
-	if (!bitmap_empty(&syncobj->pending, HGSL_MAX_SYNCPOINTS))
+	if (cancelled)
 		hgsl_dispatch_queue_context(drawobj->context);
 }
 
@@ -855,12 +895,28 @@ static int drawobj_add_sync_fence(struct hgsl_priv *hgsl_priv,
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 
+	/*
+	 * Populate fence info before async_wait so the names are available
+	 * even when the fence is already signaled at queue time (in which
+	 * case async_wait returns NULL and we return early below).
+	 */
+	if (priv) {
+		struct dma_fence *f = sync_file_get_fence(sync_fence.fd);
+
+		if (f) {
+			if (hgsl_fill_fence_info(f, priv)) {
+				kfree(priv);
+				priv = NULL;
+			}
+			dma_fence_put(f);
+		}
+	}
+	event->priv = priv;
+
 	set_bit(event->id, &syncobj->pending);
 
 	event->handle = hgsl_sync_fence_async_wait(sync_fence.fd,
 		drawobj_sync_fence_func, event);
-
-	event->priv = priv;
 
 	if (IS_ERR_OR_NULL(event->handle)) {
 		int ret = PTR_ERR(event->handle);
@@ -878,8 +934,6 @@ static int drawobj_add_sync_fence(struct hgsl_priv *hgsl_priv,
 
 		return ret;
 	}
-
-	hgsl_get_fence_info(event);
 
 	for (i = 0; priv && i < priv->num_fences; i++)
 		trace_syncpoint_fence(syncobj, priv->fences[i].name);
