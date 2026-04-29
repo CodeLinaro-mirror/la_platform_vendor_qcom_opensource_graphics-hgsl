@@ -79,6 +79,7 @@ static void hgsl_snapshot_dump(struct qcom_hgsl *hgsl_dev, uint32_t *msg_buffer,
 		return;
 	}
 
+	mutex_lock(&priv->lock);
 	mem_node = (struct hgsl_mem_node *)hgsl_mem_node_zalloc(priv->dev->cache_flags);
 	if (!mem_node) {
 		LOGE("FAILED to allocated snapshot memory node");
@@ -121,6 +122,7 @@ send_msg:
 	if (mem_node)
 		hgsl_sharedmem_free(mem_node);
 
+	mutex_unlock(&priv->lock);
 	hgsl_put_context(ctxt);
 }
 
