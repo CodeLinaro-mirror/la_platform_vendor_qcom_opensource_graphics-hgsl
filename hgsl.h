@@ -501,11 +501,9 @@ out:
 
 static inline uint32_t get_context_retired_ts(struct hgsl_context *ctxt)
 {
-	u32 ts = ctxt->shadow_ts->eop;
-
-	/* ensure read is done before comparison */
+	/* ensure read the latest value */
 	dma_rmb();
-	return ts;
+	return ctxt->shadow_ts->eop;
 }
 
 static inline int get_context_shadow_ts(
@@ -519,6 +517,9 @@ static inline int get_context_shadow_ts(
 		*timestamp = 0;
 		return -EINVAL;
 	}
+
+	/* ensure read the latest value */
+	dma_rmb();
 
 	switch (type) {
 	case GSL_TIMESTAMP_RETIRED:
@@ -536,8 +537,6 @@ static inline int get_context_shadow_ts(
 		break;
 	}
 
-	/* ensure read is done before return */
-	dma_rmb();
 	LOGD("%d, %u, %u, %u", ret, ctxt->context_id, type, *timestamp);
 	return ret;
 }

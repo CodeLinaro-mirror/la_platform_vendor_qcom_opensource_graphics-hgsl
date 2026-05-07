@@ -497,13 +497,13 @@ static int db_queue_wait_freewords(struct doorbell_queue *dbq, uint32_t size)
 		return -EINVAL;
 
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		hard_reset_req = hgsl_dbq_get_state_info((uint32_t *)dbq->vbase,
 			HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 			HGSL_DBQ_CONTEXT_ANY,
 			HGSL_DBQ_HOST_TO_GVM_HARDRESET_REQ);
-
-		/* ensure read is done before comparison */
-		dma_rmb();
 
 		if (hard_reset_req == true) {
 			if (db_get_busy_state(dbq->vbase) == true)
@@ -539,6 +539,9 @@ static int dbcq_queue_wait_freewords(struct doorbell_context_queue *dbcq, uint32
 	unsigned int retry_count = 0;
 
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		if (db_context_queue_freedwords(dbcq) >= size)
 			return 0;
 
@@ -554,13 +557,13 @@ static int db_get_busy_state(void *dbq_base)
 {
 	unsigned int busy_state = false;
 
+	/* ensure read the latest value */
+	dma_rmb();
+
 	busy_state = hgsl_dbq_get_state_info((uint32_t *)dbq_base,
 		HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 		HGSL_DBQ_CONTEXT_ANY,
 		HGSL_DBQ_GVM_TO_HOST_HARDRESET_DISPATCH_IN_BUSY);
-
-	/* ensure read is done before comparison */
-	dma_rmb();
 
 	return busy_state;
 }
@@ -678,13 +681,13 @@ static int db_send_msg(struct hgsl_priv	 *priv,
 
 	cmds = (struct hgsl_db_cmds *)msg_req->ptr_data;
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		hard_reset_req = hgsl_dbq_get_state_info((uint32_t *)dbq->vbase,
 			HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 			HGSL_DBQ_CONTEXT_ANY,
 			HGSL_DBQ_HOST_TO_GVM_HARDRESET_REQ);
-
-		/* ensure read is done before comparison */
-		dma_rmb();
 
 		if (hard_reset_req) {
 			if (msleep_interruptible(1)) {
