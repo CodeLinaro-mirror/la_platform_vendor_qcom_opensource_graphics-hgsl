@@ -651,6 +651,7 @@ quit:
 	/* let user try again incase we miss to submit */
 	if (-ETIMEDOUT == ret) {
 		LOGE("Timed out to send db msg, try again\n");
+		hgsl_debugfs_dump_ctxts(&ctxt, 1, hgsl, false);
 		ret = -EAGAIN;
 	}
 	return ret;
