@@ -1422,7 +1422,7 @@ static int hgsl_dbcq_issue_cmd(struct hgsl_priv  *priv,
 	req.msg_dwords = msg_dwords;
 	req.ptr_data = cmds;
 
-	if (!ctxt->is_killed)
+	if (likely(!READ_ONCE(ctxt->in_destroy)))
 		ret = dbcq_send_msg(priv, &db_msg_id, &req, &resp, ctxt);
 	else {
 		/* Retire ts immediately*/
@@ -1432,7 +1432,8 @@ static int hgsl_dbcq_issue_cmd(struct hgsl_priv  *priv,
 			*timestamp);
 
 		/* Trigger event to waitfor ts thread */
-		_signal_contexts(hgsl, ctxt->devhandle);
+		wake_up_all(&ctxt->wait_q);
+		hgsl_process_event_group(hgsl, &ctxt->event_group);
 		ret = 0;
 	}
 
@@ -1569,7 +1570,7 @@ static int hgsl_db_issue_cmd(struct hgsl_priv *priv,
 	req.msg_dwords = msg_dwords;
 	req.ptr_data = cmds;
 
-	if (!ctxt->is_killed)
+	if (likely(!READ_ONCE(ctxt->in_destroy)))
 		ret = db_send_msg(priv, &db_msg_id, &req, &resp, ctxt);
 	else {
 		/* Retire ts immediately*/
@@ -1579,7 +1580,8 @@ static int hgsl_db_issue_cmd(struct hgsl_priv *priv,
 			*timestamp);
 
 		/* Trigger event to waitfor ts thread */
-		_signal_contexts(hgsl, ctxt->devhandle);
+		wake_up_all(&ctxt->wait_q);
+		hgsl_process_event_group(hgsl, &ctxt->event_group);
 		ret = 0;
 	}
 
@@ -2250,6 +2252,7 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	struct qcom_hgsl *hgsl = priv->dev;
 	struct hgsl_context *ctxt = NULL;
 	int ret;
+	long wait_ret;
 	bool put_channel = false;
 	bool skip_hab = false;
 	struct doorbell_queue *dbq = NULL;
@@ -2288,9 +2291,6 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 
 	/* unblock all waiting threads on this context */
 	WRITE_ONCE(ctxt->in_destroy, true);
-	/* fast-retire all pending GPU submissions so _retire_drawobjs can
-	 * drain dispatch->drawobj_list without contacting the hypervisor */
-	ctxt->is_killed = true;
 
 	/* Make sure all pending events are processed or cancelled */
 	hgsl_ctxt_detach_drawobjs(hgsl, ctxt);
@@ -2298,8 +2298,21 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	wake_up_all(&ctxt->wait_q);
 	hgsl_put_context(ctxt);
 
-	wait_event_killable_timeout(ctxt->destroyed_wq,
-		READ_ONCE(ctxt->destroyed), msecs_to_jiffies(5000));
+	/* On timeout or signal skip teardown: freeing while kref > 0
+	 * causes use-after-free; leak the context instead. */
+	wait_ret = wait_event_killable_timeout(ctxt->destroyed_wq,
+			READ_ONCE(ctxt->destroyed), msecs_to_jiffies(5000));
+	if (wait_ret == 0) {
+		LOGE("ctx:%d destroy timed out, context leaked\n",
+			ctxt->context_id);
+		ret = -ETIMEDOUT;
+		goto out;
+	} else if (wait_ret < 0) {
+		LOGE("ctx:%d destroy interrupted by fatal signal, context leaked\n",
+			ctxt->context_id);
+		ret = wait_ret;
+		goto out;
+	}
 
 	mutex_lock(&hgsl->destroying_ctx_list_lock);
 	list_del_init(&ctxt->node);
