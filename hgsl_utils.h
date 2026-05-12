@@ -40,6 +40,36 @@ enum {
 
 #define OS_UNUSED(param) ((void)param)
 
+/**
+ * HGSL_ZALLOC_CACHED - Zero-allocate an object, preferring a slab cache and
+ *                       falling back to kzalloc() when the cache is unavailable.
+ *
+ * Both paths zero-initialise the object so callers need not distinguish
+ * between the two allocation paths.
+ *
+ * @_cache: struct kmem_cache * (may be NULL)
+ * @_type:  the struct type to allocate (used for sizeof in the fallback path)
+ * @_gfp:   GFP flags passed to both paths
+ */
+#define HGSL_ZALLOC_CACHED(_cache, _type, _gfp) \
+	(likely(_cache) ? kmem_cache_zalloc((_cache), (_gfp)) \
+			: kzalloc(sizeof(_type), (_gfp)))
+
+/**
+ * HGSL_FREE_CACHED - Return an object to its slab cache, or kfree() it
+ *                    when the cache is unavailable.
+ *
+ * @_cache: struct kmem_cache * (may be NULL)
+ * @_obj:   pointer to the object to free
+ */
+#define HGSL_FREE_CACHED(_cache, _obj) \
+	do { \
+		if (likely(_cache)) \
+			kmem_cache_free((_cache), (_obj)); \
+		else \
+			kfree(_obj); \
+	} while (0)
+
 static inline void *hgsl_malloc(size_t size)
 {
 	if (size <= PAGE_SIZE)
@@ -126,5 +156,29 @@ static inline void hgsl_regmap_write(struct regmap *regmap, u32 offset, u32 valu
 	regmap_write(regmap, offset, value);
 }
 
+static inline int hgsl_check_userparams(
+	uint64_t uaddr64,
+	uint32_t usize)
+{
+	unsigned long uaddr, size, end;
+
+	if (!uaddr64 || !usize)
+		return -EINVAL;
+
+	uaddr = (unsigned long)untagged_addr(uaddr64);
+	size = (unsigned long)usize;
+
+	/* Check for integer overflow */
+	if (uaddr > ULONG_MAX - size)
+		return -EINVAL;
+
+	end = uaddr + size;
+
+	/* Quick check user addr limit */
+	if (uaddr >= TASK_SIZE_MAX || end > TASK_SIZE_MAX)
+		return -EFAULT;
+
+	return 0;
+}
 
 #endif  /* __HGSL_UTILS_H */

@@ -53,6 +53,7 @@ enum gsl_user_mem_type_t {
 struct hgsl_cache_flags {
 	bool default_iocoherency;
 	bool writecombine_enable;
+	bool skip_cache_ops;
 };
 
 struct hgsl_mem_node_iommu_info {
@@ -92,6 +93,13 @@ struct hgsl_mem_node {
 	struct hgsl_pagetable     *pagetable;
 	struct hgsl_priv          *ptr_hgsl_priv;
 	struct iosys_map          kva_map;
+	/*
+	 * Per-node lock protecting sgt creation/destruction and vmap
+	 * operations. Replaces the former global hgsl_map_global_lock so
+	 * that concurrent operations on different mem_nodes no longer
+	 * serialise against each other.
+	 */
+	struct mutex              sgt_lock;
 };
 
 int hgsl_sharedmem_alloc(struct device *dev, uint32_t sizebytes,
@@ -105,6 +113,28 @@ int hgsl_mem_cache_op(struct device *dev, struct hgsl_mem_node *mem_node,
 void hgsl_put_sgt(struct hgsl_mem_node *mem_node, bool internal);
 
 void *hgsl_mem_node_zalloc(struct hgsl_cache_flags cache_flags);
+
+/**
+ * hgsl_mem_node_free() - return a node to the dedicated kmem_cache.
+ *
+ * Must be used for every node that was obtained via hgsl_mem_node_zalloc().
+ * Safe to call with a NULL pointer.
+ */
+void hgsl_mem_node_free(struct hgsl_mem_node *mem_node);
+
+/**
+ * hgsl_mem_node_cache_init() - create the hgsl_mem_node slab cache.
+ *
+ * Called once from hgsl_init().  Returns 0 on success, -ENOMEM on failure.
+ */
+void hgsl_mem_node_cache_init(void);
+
+/**
+ * hgsl_mem_node_cache_destroy() - destroy the hgsl_mem_node slab cache.
+ *
+ * Called once from hgsl_exit().
+ */
+void hgsl_mem_node_cache_destroy(void);
 
 int hgsl_mem_add_node(struct rb_root *rb_root,
 		struct hgsl_mem_node *mem_node);

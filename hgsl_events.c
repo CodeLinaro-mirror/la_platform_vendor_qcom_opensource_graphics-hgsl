@@ -7,6 +7,7 @@
 #include <linux/spinlock.h>
 
 #include "hgsl.h"
+#include "hgsl_trace.h"
 #include "hgsl_dispatch.h"
 
 /**
@@ -31,6 +32,8 @@ static inline void signal_event(struct hgsl_event *event, int result)
 {
 	list_del(&event->node);
 	event->result = result;
+
+	trace_retire_event_signal(event);
 	kthread_queue_work(event->hgsl->events_worker, &event->work);
 }
 
@@ -47,8 +50,9 @@ static void _hgsl_event_worker(struct kthread_work *work)
 
 	event->func(event->hgsl, event->group, event->priv, event->result);
 
+	trace_retire_event_cbfunc(event);
 	hgsl_put_context(event->context);
-	kmem_cache_free(events_cache, event);
+	HGSL_FREE_CACHED(events_cache, event);
 }
 
 static void _process_event_group(struct qcom_hgsl *hgsl,
@@ -56,13 +60,9 @@ static void _process_event_group(struct qcom_hgsl *hgsl,
 		bool flush)
 {
 	struct hgsl_event *event, *tmp;
-	struct hgsl_context *ctxt;
+	struct hgsl_context *ctxt = container_of(group,
+		struct hgsl_context, event_group);
 	u32 retired;
-
-	if (group == NULL)
-		return;
-
-	ctxt = group->context;
 
 	/*
 	 * Sanity check to be sure that we aren't racing with the context
@@ -71,10 +71,25 @@ static void _process_event_group(struct qcom_hgsl *hgsl,
 	if (WARN_ON(!hgsl_context_get(ctxt)))
 		return;
 
-	spin_lock(&group->lock);
+	/* Sanity check if the group is inintalized */
+	if (WARN_ON(ctxt != group->context)) {
+		hgsl_put_context(ctxt);
+		return;
+	}
 
-	group->readtimestamp(group->context, GSL_TIMESTAMP_RETIRED,
-		&retired);
+	/*
+	 * Read the retired timestamp before taking the spinlock.
+	 * group->readtimestamp is hgsl_read_timestamp(), which tries
+	 * shadow_ts first and falls back to a hyp IPC call if shadow_ts
+	 * is not available.  The hyp path may sleep, so it must not be
+	 * called while holding the spinlock.
+	 */
+	if (group->readtimestamp(ctxt, GSL_TIMESTAMP_RETIRED, &retired)) {
+		hgsl_put_context(ctxt);
+		return;
+	}
+
+	spin_lock(&group->lock);
 
 	if (!flush && hgsl_ts32_ge(group->processed, retired))
 		goto out;
@@ -125,15 +140,29 @@ void hgsl_cancel_events_timestamp(struct qcom_hgsl *hgsl,
 		struct hgsl_event_group *group, u32 timestamp)
 {
 	struct hgsl_event *event, *tmp;
+	struct hgsl_context *ctxt = container_of(group,
+		struct hgsl_context, event_group);
+
+	/*
+	 * Sanity check to be sure that we aren't racing with the context
+	 * getting destroyed
+	 */
+	if (WARN_ON(!hgsl_context_get(ctxt)))
+		return;
+
+	/* Sanity check if the group is inintalized */
+	if (WARN_ON(ctxt != group->context)) {
+		hgsl_put_context(ctxt);
+		return;
+	}
 
 	spin_lock(&group->lock);
-
 	list_for_each_entry_safe(event, tmp, &group->events, node) {
 		if (timestamp == event->timestamp)
 			signal_event(event, HGSL_EVENT_CANCELLED);
 	}
-
 	spin_unlock(&group->lock);
+	hgsl_put_context(ctxt);
 }
 
 /**
@@ -149,9 +178,23 @@ void hgsl_cancel_event(struct qcom_hgsl *hgsl,
 		hgsl_event_func func, void *priv)
 {
 	struct hgsl_event *event, *tmp;
+	struct hgsl_context *ctxt = container_of(group,
+		struct hgsl_context, event_group);
+
+	/*
+	 * Sanity check to be sure that we aren't racing with the context
+	 * getting destroyed
+	 */
+	if (WARN_ON(!hgsl_context_get(ctxt)))
+		return;
+
+	/* Sanity check if the group is inintalized */
+	if (WARN_ON(ctxt != group->context)) {
+		hgsl_put_context(ctxt);
+		return;
+	}
 
 	spin_lock(&group->lock);
-
 	list_for_each_entry_safe(event, tmp, &group->events, node) {
 		if (timestamp == event->timestamp && func == event->func &&
 			event->priv == priv) {
@@ -159,47 +202,58 @@ void hgsl_cancel_event(struct qcom_hgsl *hgsl,
 			break;
 		}
 	}
-
 	spin_unlock(&group->lock);
+	hgsl_put_context(ctxt);
 }
 
 int hgsl_add_event(struct hgsl_priv *hgsl_priv, struct hgsl_event_group *group,
 		u32 timestamp, hgsl_event_func func, void *priv)
 {
 	struct qcom_hgsl *hgsl = hgsl_priv->dev;
-	u32 queued;
-	struct hgsl_context *ctxt = group->context;
+	struct hgsl_context *ctxt = container_of(group,
+		struct hgsl_context, event_group);
 	struct hgsl_event *event;
+	u32 queued;
 
 	if (!func)
 		return -EINVAL;
+
+	/* Get a reference to the context while the event is active */
+	if (WARN_ON(!hgsl_context_get(ctxt)))
+		return -ENOENT;
+
+	/* Sanity check if the group is inintalized */
+	if (WARN_ON(ctxt != group->context)) {
+		hgsl_put_context(ctxt);
+		return -EINVAL;
+	}
 
 	/*
 	 * If the caller is creating their own timestamps, let them schedule
 	 * events in the future. Otherwise only allow timestamps that have been
 	 * queued.
 	 */
-	if (!ctxt || !(ctxt->flags & GSL_CONTEXT_FLAG_USER_GENERATED_TS)) {
-		group->readtimestamp(group->context, GSL_TIMESTAMP_QUEUED,
+	if (!(ctxt->flags & GSL_CONTEXT_FLAG_USER_GENERATED_TS)) {
+		group->readtimestamp(ctxt, GSL_TIMESTAMP_QUEUED,
 			&queued);
-		if (hgsl_ts32_ge(timestamp, queued) > 0)
+		if (hgsl_ts32_ge(timestamp, queued) > 0) {
+			hgsl_put_context(ctxt);
 			return -EINVAL;
+		}
 	}
 
 	if (hgsl_ts32_ge(group->processed, timestamp)) {
 		/* Already retired, cb directly */
 		func(hgsl, group, priv, HGSL_EVENT_RETIRED);
+		/* No reason to hold context refcnt, put here */
+		hgsl_put_context(ctxt);
 		return 0;
 	}
 
-	event = kmem_cache_alloc(events_cache, GFP_KERNEL);
-	if (event == NULL)
+	event = HGSL_ZALLOC_CACHED(events_cache, struct hgsl_event, GFP_KERNEL);
+	if (!event) {
+		hgsl_put_context(ctxt);
 		return -ENOMEM;
-
-	/* Get a reference to the context while the event is active */
-	if (!hgsl_context_get(ctxt)) {
-		kmem_cache_free(events_cache, event);
-		return -ENOENT;
 	}
 
 	event->hgsl = hgsl;
@@ -207,7 +261,7 @@ int hgsl_add_event(struct hgsl_priv *hgsl_priv, struct hgsl_event_group *group,
 	event->timestamp = timestamp;
 	event->priv = priv;
 	event->func = func;
-	event->created = jiffies;
+	event->created = get_jiffies_64();
 	event->group = group;
 
 	kthread_init_work(&event->work, _hgsl_event_worker);
@@ -223,9 +277,7 @@ int hgsl_add_event(struct hgsl_priv *hgsl_priv, struct hgsl_event_group *group,
 
 	/* Add the event to the group list */
 	list_add_tail(&event->node, &group->events);
-
 	spin_unlock(&group->lock);
-
 	return 0;
 }
 
@@ -317,10 +369,10 @@ int hgsl_events_init(struct qcom_hgsl *hgsl)
 	struct kthread_worker *events_worker;
 	int ret = 0;
 
-	events_cache = KMEM_CACHE(hgsl_event, 0);
+	events_cache = KMEM_CACHE(hgsl_event, SLAB_HWCACHE_ALIGN);
 	if (IS_ERR_OR_NULL(events_cache)) {
-		LOGE("Failed to allocate events_cache.\n");
-		return -ENOMEM;
+		LOGW("Failed to allocate events_cache, falling back to kzalloc.\n");
+		events_cache = NULL;
 	}
 
 	/*
@@ -351,7 +403,9 @@ int hgsl_events_init(struct qcom_hgsl *hgsl)
 
 	return 0;
 err:
-	kmem_cache_destroy(events_cache);
-	events_cache = NULL;
+	if (!IS_ERR_OR_NULL(events_cache)) {
+		kmem_cache_destroy(events_cache);
+		events_cache = NULL;
+	}
 	return ret;
 }

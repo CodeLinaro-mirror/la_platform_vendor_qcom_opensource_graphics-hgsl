@@ -550,7 +550,8 @@ static int hgsl_iommu_setup_context(struct hgsl_mmu *mmu,
 
 	pdev = of_find_device_by_node(node);
 	if (!pdev) {
-		LOGE("of_find_device_by_node() failed");
+		LOGE("of_find_device_by_node() failed for %s", name);
+		ret = -ENODEV;
 		goto out;
 	}
 
@@ -763,21 +764,32 @@ static int iommu_probe_user_context(struct qcom_hgsl *hgsl_dev,
 	uint32_t dev_num = HGSL_GPU_0;
 
 	for (dev_num = HGSL_GPU_0; dev_num < HGSL_DEVICE_NUM; dev_num++) {
-		memset(&iommu->user_context[dev_num], 0, sizeof(iommu->user_context[dev_num]));
-		atomic_set(&iommu->user_context[dev_num].pagetables, 0);
+		if (iommu->user_context[dev_num].domain) {
+			LOGW("IOMMU context %u already initialized", dev_num);
+			continue;
+		}
+		// Setup iommu for the GPU which is allowed to use by the backend
+		if (get_fv_status(hgsl_dev, dev_num)) {
+			LOGD("hgsl setup iommu domain for device %u", dev_num);
+			memset(&iommu->user_context[dev_num], 0, sizeof(iommu->user_context[dev_num]));
+			atomic_set(&iommu->user_context[dev_num].pagetables, 0);
 
-		snprintf(node_name, sizeof(node_name), "gfx3d_user_%d", dev_num);
+			snprintf(node_name, sizeof(node_name), "gfx3d_user_%d", dev_num);
 
-		ret[dev_num] = hgsl_iommu_setup_context(mmu, node, &iommu->user_context[dev_num],
-						node_name, fault_handlers[dev_num]);
-		if (ret[dev_num])
-			LOGE("hgsl_iommu_setup_context() failed for GPU device %d ret=%d",
-					dev_num, ret[dev_num]);
-		/*
-		 * TO DO: If it will get  used during per process PT enablement
-		 * then will keep it otherwise will remove.
-		 */
-		iommu->user_context[dev_num].mask = 1;
+			ret[dev_num] = hgsl_iommu_setup_context(mmu, node, &iommu->user_context[dev_num],
+							node_name, fault_handlers[dev_num]);
+			if (ret[dev_num])
+				LOGE("hgsl_iommu_setup_context() failed for GPU device %d ret=%d",
+						dev_num, ret[dev_num]);
+			else
+			/*
+			 * TO DO: If it will get  used during per process PT enablement
+			 * then will keep it otherwise will remove.
+			 */
+				iommu->user_context[dev_num].mask = 1;
+		} else
+			LOGI("Skip IOMMU initialization for GPU de %u - FV not enabled",
+				dev_num);
 	}
 
 	if (ret[HGSL_GPU_0] && ret[HGSL_GPU_1]) {
@@ -904,10 +916,10 @@ int hgsl_iommu_bind(struct platform_device *pdev, struct qcom_hgsl *hgsl_dev)
 #ifdef CONFIG_PER_PROCESS_PT
 	/* Create a kmem cache for the pagetable address objects */
 	if (!addr_entry_cache) {
-		addr_entry_cache = KMEM_CACHE(hgsl_iommu_addr_entry, 0);
-		if (!addr_entry_cache) {
-			ret = -ENOMEM;
-			goto err;
+		addr_entry_cache = KMEM_CACHE(hgsl_iommu_addr_entry, SLAB_HWCACHE_ALIGN);
+		if (IS_ERR_OR_NULL(addr_entry_cache)) {
+			LOGW("Failed to allocate addr_entry_cache, falling back to kzalloc.\n");
+			addr_entry_cache = NULL;
 		}
 	}
 	/*
@@ -1350,7 +1362,7 @@ static int _insert_gpuaddr(struct hgsl_pagetable *pagetable,
 {
 	struct rb_node **node, *parent = NULL;
 	struct hgsl_iommu_addr_entry *new =
-			kmem_cache_alloc(addr_entry_cache, GFP_ATOMIC);
+			HGSL_ZALLOC_CACHED(addr_entry_cache, struct hgsl_iommu_addr_entry, GFP_ATOMIC);
 
 	if (new == NULL)
 		return -ENOMEM;
@@ -1373,7 +1385,7 @@ static int _insert_gpuaddr(struct hgsl_pagetable *pagetable,
 		else {
 			/* Duplicate entry */
 			WARN(1, "duplicate gpuaddr: 0x%llx\n", gpuaddr);
-			kmem_cache_free(addr_entry_cache, new);
+			HGSL_FREE_CACHED(addr_entry_cache, new);
 			return -EEXIST;
 		}
 	}
@@ -1521,7 +1533,7 @@ static int _remove_gpuaddr(struct hgsl_pagetable *pagetable,
 	}
 
 	rb_erase(&entry->node, &pagetable->rbtree);
-	kmem_cache_free(addr_entry_cache, entry);
+	HGSL_FREE_CACHED(addr_entry_cache, entry);
 	return 0;
 }
 

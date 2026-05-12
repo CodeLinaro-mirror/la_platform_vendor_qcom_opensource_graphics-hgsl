@@ -74,6 +74,15 @@
 #define DBCQ_SIGNAL_MAX DB_SIGNAL_GLOBAL_3
 #define HGSL_CLEANUP_WAIT_SLICE_IN_MS  50
 
+#define HGSL_CHIP_ID_C314  0x43030E00U
+#define HGSL_CHIP_ID_C523  0x43051700U
+
+static inline bool hgsl_is_iocoherent_gpu(uint32_t chip_id)
+{
+	return chip_id == HGSL_CHIP_ID_C314 ||
+	       chip_id == HGSL_CHIP_ID_C523;
+}
+
 #define QHDR_STATUS_INACTIVE 0x00
 #define QHDR_STATUS_ACTIVE 0x01
 
@@ -146,20 +155,6 @@ enum HGSL_DBQ_IBDESC_WAIT_TYPE {
 #define HGSL_CTXT_QUEUE_TOTAL_SIZE           PAGE_ALIGN(HGSL_CTXT_QUEUE_INDIRECT_IB_SIZE +\
 							HGSL_CTXT_QUEUE_INDIRECT_IB_OFFSET)
 
-struct ctx_queue_header {
-	uint32_t version;             // Version of the context queue header
-	uint32_t startAddr;           // GMU VA of start of queue
-	uint32_t dwSize;              // Queue size in dwords
-	uint32_t outFenceTs; // Timestamp of the last output hardware fence sent to TxQueue
-	uint32_t syncObjTs;  // Timestamp of last SYNC object that has been signaled
-	uint32_t readIdx;    // Read index of the queue
-	uint32_t writeIdx;   // Write index of the queue
-	uint32_t hwFenceArrayAddr;    // GMU VA of the buffer to store output hardware fences
-	uint32_t hwFenceArraySize;    // Size(bytes) of the buffer to store output hardware fences
-	uint32_t dbqSignal;
-	uint32_t unused0;
-	uint32_t unused1;
-};
 
 static void _signal_contexts(struct qcom_hgsl *hgsl, u32 dev_hnd);
 
@@ -426,9 +421,14 @@ static void tcsr_ring_global_db(struct qcom_hgsl *hgsl, uint32_t tcsr_idx,
 				GLB_DB_SRC_ISSUEIB_IRQ_ID_0 + dbq_idx);
 }
 
-static inline bool get_fv_status(struct qcom_hgsl *hgsl, u32 dev_id)
+bool get_fv_status(struct qcom_hgsl *hgsl, u32 dev_id)
 {
 	bool fv_status = false;
+
+	if (!hgsl) {
+		LOGE("Invalid hgsl dev");
+		goto out;
+	}
 
 	if (!hgsl->fv_on)
 		goto out;
@@ -1122,7 +1122,7 @@ static void hgsl_free_per_device_ipc_queues(struct qcom_hgsl *hgsl, uint32_t dev
 	if (!mem_node)
 		return;
 
-	if (mem_node->dma_buf) {
+	if (mem_node->dma_buf && mem_node->kva_map.vaddr) {
 		dma_buf_vunmap_unlocked(mem_node->dma_buf, vmap);
 		dma_buf_end_cpu_access(mem_node->dma_buf, DMA_BIDIRECTIONAL);
 		memset(vmap, 0, sizeof(struct iosys_map));
@@ -1171,7 +1171,7 @@ static int hgsl_init_ipcq_memnode(struct qcom_hgsl *hgsl, int allocate_size,
 
 err:
 	if (node) {
-		if (node->dma_buf) {
+		if (node->dma_buf && node->kva_map.vaddr) {
 			dma_buf_vunmap_unlocked(node->dma_buf,
 				&(hgsl->ipcq_memnode_vmap[dev_idx][q_type]));
 			dma_buf_end_cpu_access(node->dma_buf, DMA_BIDIRECTIONAL);
@@ -1618,8 +1618,6 @@ static void hgsl_close_global_hyp_and_gsl_lib(struct qcom_hgsl *hgsl)
 
 	if (hgsl->global_hyp_inited) {
 		(void)hgsl_hyp_lib_close(&hgsl->global_hyp, 0, &rval);
-		if (rval)
-			LOGW("hgsl_hyp_lib_close() failed");
 		hgsl->global_hyp_inited = false;
 	}
 
@@ -1637,66 +1635,71 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 	u32 gpu_id = 0;
 
 	ret_val = hgsl_hyp_init(&hgsl->global_hyp, hgsl->dev, 0, "hgsl");
-	if (ret_val != 0)
+	if (ret_val != 0) {
+		LOGE("hgsl_hyp_init() failed with ret_val = %d", ret_val);
 		goto out;
+	}
 
 	/* Retry to communicate with BE here first do gsl_lib_open*/
 	do {
 		ret_val = hgsl_hyp_lib_open(&hgsl->global_hyp, 0, &rval);
 	} while (ret_val == -EAGAIN && retry_count--);
 
-	if (rval) {
-		LOGE("hgsl_hyp_lib_open() failed with ret_val %d", ret_val);
+	if (ret_val || rval) {
+		LOGE("hgsl_hyp_lib_open() failed with ret_val %d rval %d retry_count %u",
+				ret_val, rval, retry_count);
 		ret_val = -EINVAL;
-		hgsl_hyp_close(&hgsl->global_hyp);
 		goto out;
 	}
 
-	/* Do gsl_device_open for both GPU device handles */
-	for (dev_hnd = GSL_HANDLE_DEV0; dev_hnd <= HGSL_DEVICE_NUM; dev_hnd++) {
-		device_id = (dev_hnd == GSL_HANDLE_DEV0) ? GSL_DEVICE_0 : GSL_DEVICE_1;
-		gpu_id = hgsl_hnd2id(dev_hnd);
+	if (hgsl->fv_on) {
+		/* Do gsl_device_open for both GPU device handles */
+		for (dev_hnd = GSL_HANDLE_DEV0; dev_hnd <= HGSL_DEVICE_NUM; dev_hnd++) {
+			device_id = (dev_hnd == GSL_HANDLE_DEV0) ? GSL_DEVICE_0 : GSL_DEVICE_1;
+			gpu_id = hgsl_hnd2id(dev_hnd);
 
-		LOGD("hgsl_hyp_device_open for device id %d", device_id);
-		ret[gpu_id] = hgsl_hyp_device_open(&hgsl->global_hyp, 0,
-						device_id, &rval);
-		if (ret[gpu_id]) {
-			LOGE("hgsl_hyp_device_open() failed for %s with ret %d",
-					((dev_hnd == GSL_HANDLE_DEV0) ? "GSL_HANDLE_DEV0" :
-							"GSL_HANDLE_DEV1"), ret[gpu_id]);
-			ret_val = -EINVAL;
-			continue;
-		} else {
-			/*
-				* Device handle returned by BE should be according to
-				* passed device id for other values consider it as error.
-				*/
-			if (dev_hnd != rval) {
-				LOGE("Inval dev_handle from BE rval=%d dev_id %d",
-						rval, device_id);
-				ret_val = -EINVAL;
+			LOGD("hgsl_hyp_device_open for device id %d", device_id);
+			ret[gpu_id] = hgsl_hyp_device_open(&hgsl->global_hyp, 0,
+							device_id, &rval);
+			if (ret[gpu_id]) {
+				LOGE("hgsl_hyp_device_open() failed for %s with ret %d",
+						((dev_hnd == GSL_HANDLE_DEV0) ? "GSL_HANDLE_DEV0" :
+								"GSL_HANDLE_DEV1"), ret[gpu_id]);
 				continue;
 			} else {
-				LOGD("Dev_handle from BE %d dev_id %d",
-						rval, device_id);
-				hgsl->device_handle[gpu_id] = rval;
+				/*
+				 * Device handle returned by BE should be according to
+				 * passed device id for other values consider it as error.
+				 */
+				if (dev_hnd != rval) {
+					LOGE("Inval dev_handle from BE rval=%d dev_id %d",
+							rval, device_id);
+					ret[gpu_id] = -EINVAL;
+					continue;
+				} else {
+					LOGD("Dev_handle from BE %d dev_id %d",
+							rval, device_id);
+					hgsl->device_handle[gpu_id] = rval;
+				}
 			}
 		}
-	}
 
-	if (ret[GSL_HANDLE_DEV0 - 1] && ret[GSL_HANDLE_DEV1 - 1]) {
-		LOGE("Failed for both GPU device handles");
-		hgsl_close_global_hyp_and_gsl_lib(hgsl);
-		ret_val = -EINVAL;
-		goto out;
-	} else {
 		/*
 		 * Return ret_val as an error only when hgsl fails
 		 * to open both GPU device handles.
 		 */
-		ret_val = 0;
-		hgsl->global_hyp_inited = true;
+		if (ret[GSL_HANDLE_DEV0 - 1] && ret[GSL_HANDLE_DEV1 - 1]) {
+			LOGE("Failed for both GPU device handles");
+			ret_val = -EINVAL;
+			goto out;
+		}
 	}
+
+	/* Fetch chip_id: prefer GSL_HANDLE_DEV0, fall back to GSL_HANDLE_DEV1 */
+	hgsl_hyp_device_getinfo(hgsl, &hgsl->chip_id);
+
+	if (!ret_val)
+		hgsl->global_hyp_inited = true;
 
 out:
 	return ret_val;
@@ -1796,11 +1799,16 @@ static void _cleanup_shadow(struct hgsl_hab_channel_t *hab_channel,
 	}
 
 	if (ctxt->is_fe_shadow) {
+		/*
+		 * The shadow TS buffer is mapped in backend by GSL HAB server,
+		 * so now request to unmap the buffer after sending RPC call
+		 * to destroy the context.
+		 */
 		hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
 		hgsl_sharedmem_free(mem_node);
 	} else {
 		hgsl_hyp_put_shadowts_mem(hab_channel, mem_node);
-		kfree(mem_node);
+		hgsl_mem_node_free(mem_node);
 	}
 
 	ctxt->shadow_ts_flags = 0;
@@ -1831,7 +1839,7 @@ static inline void _destroy_context(struct kref *kref)
 	/* ensure update dbq metadata is done */
 	dma_wmb();
 
-	ctxt->destroyed = true;
+	WRITE_ONCE(ctxt->destroyed, true);
 }
 
 struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
@@ -1848,8 +1856,8 @@ struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
 	if (context_id < HGSL_CONTEXT_NUM) {
 		read_lock(&hgsl->ctxt_lock);
 		ctxt = hgsl->contexts[dev_id][context_id];
-		if (ctxt)
-			kref_get(&ctxt->kref);
+		if (ctxt && !kref_get_unless_zero(&ctxt->kref))
+			ctxt = NULL;
 		read_unlock(&hgsl->ctxt_lock);
 	}
 
@@ -1894,6 +1902,12 @@ static struct hgsl_context *hgsl_remove_context(struct hgsl_priv *priv,
 		ctxt = NULL;
 	write_unlock(&hgsl->ctxt_lock);
 
+	if (ctxt) {
+		mutex_lock(&hgsl->destroying_ctx_list_lock);
+		list_add_tail(&ctxt->node, &hgsl->destroying_ctx_list);
+		mutex_unlock(&hgsl->destroying_ctx_list_lock);
+	}
+
 	return ctxt;
 }
 
@@ -1921,11 +1935,12 @@ static void hgsl_get_shadowts_mem(struct hgsl_hab_channel_t *hab_channel,
 {
 	struct dma_buf *dma_buf = NULL;
 	int ret = 0;
+	struct qcom_hgsl *hgsl = ctxt->priv->dev;
 
 	if (ctxt->shadow_ts_node)
 		return;
 
-	ctxt->shadow_ts_node = hgsl_zalloc(sizeof(*ctxt->shadow_ts_node));
+	ctxt->shadow_ts_node = hgsl_mem_node_zalloc(hgsl->cache_flags);
 	if (ctxt->shadow_ts_node == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -2232,7 +2247,7 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	}
 
 	/* unblock all waiting threads on this context */
-	ctxt->in_destroy = true;
+	WRITE_ONCE(ctxt->in_destroy, true);
 
 	/* Make sure all pending events are processed or cancelled */
 	hgsl_ctxt_detach_drawobjs(hgsl, ctxt);
@@ -2240,8 +2255,12 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	wake_up_all(&ctxt->wait_q);
 	hgsl_put_context(ctxt);
 
-	while (!ctxt->destroyed)
+	while (!READ_ONCE(ctxt->destroyed))
 		cpu_relax();
+
+	mutex_lock(&hgsl->destroying_ctx_list_lock);
+	list_del_init(&ctxt->node);
+	mutex_unlock(&hgsl->destroying_ctx_list_lock);
 
 	hgsl_dispatch_ctxt_deinit(hgsl, ctxt);
 
@@ -2369,7 +2388,7 @@ static int hgsl_ioctl_ctxt_create(
 	init_waitqueue_head(&ctxt->wait_q);
 	mutex_init(&ctxt->lock);
 
-	spin_lock_init(&ctxt->drawq_lock);
+	rt_mutex_init(&ctxt->drawq_lock);
 	init_waitqueue_head(&ctxt->drawq_wq);
 	rt_mutex_init(&ctxt->dispatch_lock);
 	hgsl_add_event_group(hgsl, &ctxt->event_group, ctxt, hgsl_read_timestamp,
@@ -2484,7 +2503,7 @@ static int hgsl_wait_timestamp(struct qcom_hgsl *hgsl,
 
 	ret = wait_event_interruptible_timeout(ctxt->wait_q,
 				_timestamp_retired(ctxt, timestamp) ||
-						ctxt->in_destroy,
+						READ_ONCE(ctxt->in_destroy),
 				msecs_to_jiffies(param->timeout));
 	if (ret == 0)
 		ret = -ETIMEDOUT;
@@ -2517,17 +2536,15 @@ static int hgsl_ioctl_hyp_generic_transaction(
 	int ret_value = 0;
 	int *pRval = NULL;
 
-	memset(pSend, 0, sizeof(pSend));
-	memset(pReply, 0, sizeof(pReply));
-
-
 	if ((params->send_num > HGSL_HYP_GENERAL_MAX_SEND_NUM) ||
 		(params->reply_num > HGSL_HYP_GENERAL_MAX_REPLY_NUM)) {
-		ret = -EINVAL;
-		LOGE("invalid Send %d or reply %d number\n",
+		LOGE("invalid Send %d or reply %d number",
 			params->send_num, params->reply_num);
-		goto out;
+		return -EINVAL;
 	}
+
+	memset(pSend, 0, sizeof(pSend));
+	memset(pReply, 0, sizeof(pReply));
 
 	for (i = 0; i < params->send_num; i++) {
 		if ((params->send_size[i] > HGSL_HYP_GENERAL_MAX_SIZE) ||
@@ -2535,19 +2552,28 @@ static int hgsl_ioctl_hyp_generic_transaction(
 			LOGE("Invalid size 0x%x for %d\n", params->send_size[i], i);
 			ret = -EINVAL;
 			goto out;
-		} else {
-			pSend[i] = hgsl_malloc(params->send_size[i]);
-			if (pSend[i] == NULL) {
-				ret = -ENOMEM;
-				goto out;
-			}
-			if (copy_from_user(pSend[i],
-				USRPTR(params->send_data[i]),
-				params->send_size[i])) {
-				LOGE("Failed to copy send data %d\n", i);
-				ret = -EFAULT;
-				goto out;
-			}
+		}
+
+		if (hgsl_check_userparams(params->send_data[i],
+			params->send_size[i])) {
+			LOGE("invalid send data or size (0x%llx, 0x%x)",
+				params->send_data[i],
+				params->send_size[i]);
+			ret = -EINVAL;
+			goto out;
+		}
+
+		pSend[i] = hgsl_malloc(params->send_size[i]);
+		if (pSend[i] == NULL) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		if (copy_from_user(pSend[i],
+			USRPTR(params->send_data[i]),
+			params->send_size[i])) {
+			LOGE("Failed to copy send data %d\n", i);
+			ret = -EFAULT;
+			goto out;
 		}
 	}
 
@@ -2556,18 +2582,33 @@ static int hgsl_ioctl_hyp_generic_transaction(
 			(params->reply_size[i] == 0)) {
 			ret = -EINVAL;
 			goto out;
-		} else {
-			pReply[i] = hgsl_malloc(params->reply_size[i]);
-			if (pReply[i] == NULL) {
-				ret = -ENOMEM;
-				goto out;
-			}
-			memset(pReply[i], 0, params->reply_size[i]);
+		}
+
+		if (hgsl_check_userparams(params->reply_data[i],
+			params->reply_size[i])) {
+			LOGE("invalid reply data or size (0x%llx, 0x%x)",
+				params->reply_data[i],
+				params->reply_size[i]);
+			ret = -EINVAL;
+			goto out;
+		}
+
+		pReply[i] = hgsl_zalloc(params->reply_size[i]);
+		if (pReply[i] == NULL) {
+			ret = -ENOMEM;
+			goto out;
 		}
 	}
 
-	if (params->ret_value)
+	if (params->ret_value) {
+		if (hgsl_check_userparams(
+			params->ret_value, sizeof(ret_value))) {
+			LOGE("invalid ret data (0x%llx)", params->ret_value);
+			ret = -EINVAL;
+			goto out;
+		}
 		pRval = &ret_value;
+	}
 
 	ret = hgsl_hyp_generic_transaction(&priv->hyp_priv,
 					params, pSend, pReply, pRval);
@@ -2612,6 +2653,13 @@ static int hgsl_ioctl_mem_alloc(
 
 	if (is_request_rejected(hgsl, use_fv, priv)) {
 		LOGE("Request rejected: Neither of the two opened devices is active.");
+		ret = -EINVAL;
+		goto exit;
+	}
+
+	if (hgsl_check_userparams(
+		params->memdesc, sizeof(struct gsl_memdesc_t))) {
+		LOGE("invalid input memdesc (0x%llx)", params->memdesc);
 		ret = -EINVAL;
 		goto exit;
 	}
@@ -2738,6 +2786,13 @@ static int hgsl_ioctl_mem_free(
 		goto exit;
 	}
 
+	if (hgsl_check_userparams(
+		params->memdesc, sizeof(memdesc))) {
+		LOGE("invalid input memdesc (0x%llx)", params->memdesc);
+		ret = -EINVAL;
+		goto exit;
+	}
+
 	if (copy_from_user(&memdesc, USRPTR(params->memdesc),
 		sizeof(memdesc))) {
 		LOGE("failed to copy memdesc from user");
@@ -2805,9 +2860,15 @@ static int hgsl_ioctl_set_metainfo(
 
 	if (params->metainfo_len > HGSL_MEM_META_MAX_SIZE) {
 		LOGE("metainfo_len %d exceeded max", params->metainfo_len);
-		ret = -EINVAL;
-		goto out;
+		return -EINVAL;
 	}
+
+	if (hgsl_check_userparams(
+		params->metainfo, params->metainfo_len)) {
+		LOGE("invalid input metainfo (0x%llx)", params->metainfo);
+		return -EINVAL;
+	}
+
 	if (copy_from_user(metainfo, USRPTR(params->metainfo),
 					params->metainfo_len)) {
 		LOGE("failed to copy metainfo from user");
@@ -2932,13 +2993,13 @@ static int hgsl_ioctl_mem_map_smmu(
 out:
 	if (ret) {
 		if (use_fv && (!(params->flags & GSL_MEMFLAGS_PROTECTED)) &&
-							(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+			(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
 			hgsl_mmu_unmap(hgsl, pt, mem_node, false, priv->active_devicehandle);
 			hgsl_mmu_put_gpuaddr(pt, mem_node, hgsl->use_single_pt);
 		} else
 			hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
 
-		hgsl_free(mem_node);
+		hgsl_mem_node_free(mem_node);
 	}
 
 	hgsl_hyp_channel_pool_put(hab_channel);
@@ -2997,7 +3058,7 @@ static int hgsl_ioctl_mem_unmap_smmu(
 
 			hgsl_trace_gpu_mem_total(priv,
 					-(node_found->memdesc.size64));
-			hgsl_free(node_found);
+			hgsl_mem_node_free(node_found);
 		} else {
 			LOGE("mem_unmap_smmu failed %d", ret);
 
@@ -3073,6 +3134,12 @@ static int hgsl_ioctl_mem_get_fd(
 	struct gsl_memdesc_t memdesc;
 	struct hgsl_mem_node *node_found = NULL;
 	int ret = 0;
+
+	if (hgsl_check_userparams(
+		params->memdesc, sizeof(memdesc))) {
+		LOGE("invalid input memdesc 0x%llx", params->memdesc);
+		return -EINVAL;
+	}
 
 	if (copy_from_user(&memdesc, USRPTR(params->memdesc),
 		sizeof(memdesc))) {
@@ -3259,6 +3326,13 @@ static int hgsl_ioctl_issueib(
 		remote_issueib = true;
 	} else {
 		ib_size = params->num_ibs * sizeof(struct hgsl_ibdesc);
+		if (hgsl_check_userparams(params->ibs, ib_size)) {
+			LOGE("invalid input ibs (0x%llx, 0x%llx)",
+				params->ibs, ib_size);
+			ret = -EINVAL;
+			goto out;
+		}
+
 		ibs = hgsl_malloc(ib_size);
 		if (ibs == NULL) {
 			ret = -ENOMEM;
@@ -3316,6 +3390,13 @@ static int hgsl_ioctl_issueib_with_alloc_list(
 		remote_issueib = true;
 	} else {
 		ib_size = params->num_ibs * sizeof(struct gsl_command_buffer_object_t);
+		if (hgsl_check_userparams(params->ibs, ib_size)) {
+			LOGE("invalid input ib list (0x%llx, 0x%llx)",
+				params->ibs, ib_size);
+			ret = -EINVAL;
+			goto out;
+		}
+
 		ibs = hgsl_malloc(ib_size);
 		if (ibs == NULL) {
 			ret = -ENOMEM;
@@ -3329,6 +3410,14 @@ static int hgsl_ioctl_issueib_with_alloc_list(
 		if (params->num_allocations != 0) {
 			allocation_size = params->num_allocations *
 				sizeof(struct gsl_memory_object_t);
+			if (hgsl_check_userparams(
+				params->allocations, allocation_size)) {
+				LOGE("invalid input allocations (0x%llx, 0x%llx)",
+					params->allocations, allocation_size);
+				ret = -EINVAL;
+				goto out;
+			}
+
 			allocations = hgsl_malloc(allocation_size);
 			if (allocations == NULL) {
 				ret = -ENOMEM;
@@ -3349,6 +3438,14 @@ static int hgsl_ioctl_issueib_with_alloc_list(
 		}
 		be_data_size = (params->num_ibs + params->num_allocations) *
 			(sizeof(struct gsl_memdesc_t) + sizeof(uint64_t));
+		if (hgsl_check_userparams(
+			params->be_data, be_data_size)) {
+			LOGE("invalid input be_data (0x%llx, 0x%llx)",
+				params->be_data, be_data_size);
+			ret = -EINVAL;
+			goto out;
+		}
+
 		be_descs = (struct gsl_memdesc_t *)hgsl_malloc(be_data_size);
 		if (be_descs == NULL) {
 			ret = -ENOMEM;
@@ -3435,8 +3532,6 @@ int hgsl_read_timestamp(struct hgsl_context *ctxt,
 		return -ENOENT;
 
 	ret = get_context_shadow_ts(ctxt, type, timestamp);
-	hgsl_put_context(ctxt);
-
 	if (ret) {
 		param.devhandle = ctxt->devhandle;
 		param.ctxthandle = ctxt->context_id;
@@ -3444,6 +3539,7 @@ int hgsl_read_timestamp(struct hgsl_context *ctxt,
 		ret = hgsl_hyp_read_timestamp(&ctxt->priv->hyp_priv, &param);
 		*timestamp = param.timestamp;
 	}
+	hgsl_put_context(ctxt);
 
 	return ret;
 }
@@ -3538,10 +3634,16 @@ static int hgsl_ioctl_syncobj_wait_multiple(
 		(param->num_syncobjs > (SIZE_MAX / sizeof(int32_t)))) {
 		LOGE("invalid num_syncobjs %zu", param->num_syncobjs);
 		return -EINVAL;
-		goto out;
 	}
 
 	rpc_syncobj_size = sizeof(uint64_t) * param->num_syncobjs;
+	if (hgsl_check_userparams(
+		param->rpc_syncobj, rpc_syncobj_size)) {
+		LOGE("invalid input rpc_syncobj (0x%llx, 0x%llx)",
+			param->rpc_syncobj, rpc_syncobj_size);
+		return -EINVAL;
+	}
+
 	rpc_syncobj = (uint64_t *)hgsl_malloc(rpc_syncobj_size);
 	if (rpc_syncobj == NULL) {
 		LOGE("failed to allocate memory");
@@ -3556,13 +3658,12 @@ static int hgsl_ioctl_syncobj_wait_multiple(
 	}
 
 	status_size = sizeof(int32_t) * param->num_syncobjs;
-	status = (int32_t *)hgsl_malloc(status_size);
+	status = (int32_t *)hgsl_zalloc(status_size);
 	if (status == NULL) {
 		LOGE("failed to allocate memory");
 		ret = -ENOMEM;
 		goto out;
 	}
-	memset(status, 0, status_size);
 
 	ret = hgsl_hyp_syncobj_wait_multiple(&priv->hyp_priv, rpc_syncobj,
 		param->num_syncobjs, param->timeout_ms, status, &param->result);
@@ -3591,16 +3692,29 @@ static int hgsl_ioctl_perfcounter_select(
 	uint32_t *counter_ids = NULL;
 	uint32_t *counter_val_regs = NULL;
 	uint32_t *counter_val_hi_regs = NULL;
+	uint32_t usize = sizeof(uint32_t) * param->num_counters;
 
 	if ((param->num_counters <= 0) ||
-		(param->num_counters > (SIZE_MAX / (sizeof(int32_t) * 4)))) {
+		(param->num_counters > (S32_MAX / (sizeof(int32_t) * 4)))) {
 		LOGE("invalid num_counters %zu", param->num_counters);
 		return -EINVAL;
-		goto out;
 	}
 
-	groups = (uint32_t *)hgsl_malloc(
-		sizeof(int32_t) * 4 * param->num_counters);
+	if (hgsl_check_userparams(param->groups, usize) ||
+		hgsl_check_userparams(param->counter_ids, usize) ||
+		hgsl_check_userparams(param->counter_val_regs, usize) ||
+		(param->counter_val_hi_regs &&
+			hgsl_check_userparams(param->counter_val_hi_regs, usize))) {
+		LOGE("invalid input uaddr or usize (0x%llx, 0x%llx, 0x%llx, 0x%llx 0x%x)",
+			param->groups,
+			param->counter_ids,
+			param->counter_val_regs,
+			param->counter_val_hi_regs,
+			usize);
+		return -EINVAL;
+	}
+
+	groups = (uint32_t *)hgsl_malloc(usize * 4);
 	if (groups == NULL) {
 		LOGE("failed to allocate memory");
 		ret = -ENOMEM;
@@ -3612,13 +3726,13 @@ static int hgsl_ioctl_perfcounter_select(
 	counter_val_hi_regs = counter_val_regs + param->num_counters;
 
 	if (copy_from_user(groups, USRPTR(param->groups),
-		sizeof(uint32_t) * param->num_counters)) {
+		usize)) {
 		LOGE("failed to copy groups from user");
 		ret = -EFAULT;
 		goto out;
 	}
 	if (copy_from_user(counter_ids, USRPTR(param->counter_ids),
-		sizeof(uint32_t) * param->num_counters)) {
+		usize)) {
 		LOGE("failed to copy counter_ids from user");
 		ret = -EFAULT;
 		goto out;
@@ -3630,14 +3744,14 @@ static int hgsl_ioctl_perfcounter_select(
 	if (!ret) {
 		if (copy_to_user(USRPTR(param->counter_val_regs),
 			counter_val_regs,
-			sizeof(uint32_t) * param->num_counters)) {
+			usize)) {
 			ret = -EFAULT;
 			goto out;
 		}
 		if (param->counter_val_hi_regs) {
 			if (copy_to_user(USRPTR(param->counter_val_hi_regs),
 				counter_val_hi_regs,
-				sizeof(uint32_t) * param->num_counters)) {
+				usize)) {
 				ret = -EFAULT;
 				goto out;
 			}
@@ -3659,16 +3773,24 @@ static int hgsl_ioctl_perfcounter_deselect(
 	int ret = 0;
 	uint32_t *groups = NULL;
 	uint32_t *counter_ids = NULL;
+	uint32_t usize = sizeof(uint32_t) * param->num_counters;
 
 	if ((param->num_counters <= 0) ||
-		(param->num_counters > (SIZE_MAX / (sizeof(int32_t) * 2)))) {
+		(param->num_counters > (S32_MAX / (sizeof(int32_t) * 2)))) {
 		LOGE("invalid num_counters %zu", param->num_counters);
 		return -EINVAL;
-		goto out;
 	}
 
-	groups = (uint32_t *)hgsl_malloc(
-		sizeof(int32_t) * 2 * param->num_counters);
+	if (hgsl_check_userparams(param->groups, usize) ||
+		hgsl_check_userparams(param->counter_ids, usize)) {
+		LOGE("invalid input uaddr or usize (0x%llx, 0x%llx, 0x%x)",
+			param->groups,
+			param->counter_ids,
+			usize);
+		return -EINVAL;
+	}
+
+	groups = (uint32_t *)hgsl_malloc(usize * 2);
 	if (groups == NULL) {
 		LOGE("failed to allocate memory");
 		ret = -ENOMEM;
@@ -3678,13 +3800,13 @@ static int hgsl_ioctl_perfcounter_deselect(
 	counter_ids = groups + param->num_counters;
 
 	if (copy_from_user(groups, USRPTR(param->groups),
-				sizeof(uint32_t) * param->num_counters)) {
+		usize)) {
 		LOGE("failed to copy groups from user");
 		ret = -EFAULT;
 		goto out;
 	}
 	if (copy_from_user(counter_ids, USRPTR(param->counter_ids),
-				sizeof(uint32_t) * param->num_counters)) {
+		usize)) {
 		LOGE("failed to copy counter_ids from user");
 		ret = -EFAULT;
 		goto out;
@@ -3706,22 +3828,27 @@ static int hgsl_ioctl_perfcounter_query_selection(
 		*param = data;
 	int ret = 0;
 	int32_t *selections = NULL;
+	uint32_t size = sizeof(int32_t) * param->num_counters;
 
 	if ((param->num_counters <= 0) ||
-		(param->num_counters > (SIZE_MAX / sizeof(int32_t)))) {
+		(param->num_counters > (S32_MAX / sizeof(int32_t)))) {
 		LOGE("invalid num_counters %zu", param->num_counters);
 		return -EINVAL;
-		goto out;
 	}
 
-	selections = (int32_t *)hgsl_malloc(
-		sizeof(int32_t) * param->num_counters);
+	if (param->selections && hgsl_check_userparams(
+			param->selections, size)) {
+		LOGE("invalid input selections (0x%llx, 0x%x)",
+			param->selections, size);
+		return -EINVAL;
+	}
+
+	selections = (int32_t *)hgsl_zalloc(size);
 	if (selections == NULL) {
 		LOGE("failed to allocate memory");
 		ret = -ENOMEM;
 		goto out;
 	}
-	memset(selections, 0, sizeof(int32_t)  * param->num_counters);
 
 	ret = hgsl_hyp_perfcounter_query_selections(&priv->hyp_priv,
 							param, selections);
@@ -3729,12 +3856,10 @@ static int hgsl_ioctl_perfcounter_query_selection(
 	if (ret)
 		goto out;
 
-	if (param->selections != 0) {
-		if (copy_to_user(USRPTR(param->selections), selections,
-			sizeof(int32_t) * param->num_counters)) {
-			ret = -EFAULT;
-			goto out;
-		}
+	if (param->selections && copy_to_user(
+			USRPTR(param->selections), selections, size)) {
+		ret = -EFAULT;
+		goto out;
 	}
 
 out:
@@ -3782,20 +3907,11 @@ static int hgsl_ioctl_device_open(
 			goto out;
 		}
 
-		/*
-		 * Increment device open count only when application wants to
-		 * open with a different dev handle.
-		 */
-		if (priv->active_devicehandle != dev_handle)
-			priv->dev_open_count++;
-
-		/*
-		 * Store the active device handle when application calls
-		 * device_open for first time.
-		 */
+		/* Set active_devicehandle on first open of a new device handle. */
 		mutex_lock(&hgsl->mutex);
-		if ((priv->dev_open_count == 1) && (!priv->is_device_activated)
-				&& (priv->active_devicehandle != dev_handle))
+		if (priv->active_devicehandle != dev_handle &&
+			priv->dev_open_count++ == 0 &&
+			!priv->is_device_activated)
 			priv->active_devicehandle = dev_handle;
 		mutex_unlock(&hgsl->mutex);
 		/*
@@ -3952,7 +4068,9 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 	pt = hgsl_get_ctxt_pagetable(priv);
 	while (next) {
 		node_found = rb_entry(next, struct hgsl_mem_node, mem_rb_node);
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE) {
 			ret = hgsl_mmu_unmap(hgsl, pt, node_found, false,
 							priv->active_devicehandle);
 		} else {
@@ -3964,19 +4082,23 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 				node_found->export_id, node_found->memdesc.gpuaddr, ret);
 
 		// For full virtualization release GPU address back if FE unmapping is successful.
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)
 			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
 		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
 
 		next = rb_next(&node_found->mem_rb_node);
 		rb_erase(&node_found->mem_rb_node, &priv->mem_mapped);
-		hgsl_free(node_found);
+		hgsl_mem_node_free(node_found);
 	}
 
 	next = rb_first(&priv->mem_allocated);
 	while (next) {
 		node_found = rb_entry(next, struct hgsl_mem_node, mem_rb_node);
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)) {
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE) {
 			// Single pagetable TTBR0 will be used for both the GPU SMMU context banks
 			ret = hgsl_mmu_unmap(hgsl, pt, node_found, true, priv->active_devicehandle);
 		} else
@@ -3987,7 +4109,9 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 							node_found->export_id, node_found->memdesc.gpuaddr, ret);
 
 		// For full virtualization release GPU address back if FE unmapping is successful.
-		if (use_fv && (hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
+		if (use_fv &&
+			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
+			(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
 			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
 		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
 
@@ -4230,6 +4354,11 @@ static int hgsl_ioctl_timeline_signal(
 		param->timelines_size = sizeof(struct hgsl_timeline_val);
 
 	timelines = param->timelines;
+	if (hgsl_check_userparams(timelines,
+		param->timelines_size * param->count)) {
+		LOGE("invalid signal timelines (0x%llx)", timelines);
+		return -EINVAL;
+	}
 
 	for (i = 0; i < param->count; i++) {
 		struct hgsl_timeline_val val;
@@ -4265,6 +4394,11 @@ static int hgsl_ioctl_timeline_query(
 		param->timelines_size = sizeof(struct hgsl_timeline_val);
 
 	timelines = param->timelines;
+	if (hgsl_check_userparams(timelines,
+		param->timelines_size * param->count)) {
+		LOGE("invalid input timelines (0x%llx)", timelines);
+		return -EINVAL;
+	}
 
 	for (i = 0; i < param->count; i++) {
 		struct hgsl_timeline_val val;
@@ -4306,9 +4440,15 @@ static int hgsl_ioctl_gslprofiler_per_proc_gpu_busy(struct file *filep, void *da
 	struct hgsl_priv *priv = filep->private_data;
 	struct hgsl_ioctl_gslprofiler_per_proc_gpu_busy_params *param = data;
 	struct gsl_profiler_get_per_proc_gpu_busy_percentage_t *busy = NULL;
+	uint32_t usize = sizeof(*busy);
 	int ret = 0;
 
-	busy = hgsl_malloc(sizeof(struct gsl_profiler_get_per_proc_gpu_busy_percentage_t));
+	if (hgsl_check_userparams(param->busy, usize)) {
+		LOGE("invalid input busy data (0x%llx)", param->busy);
+		return -EINVAL;
+	}
+
+	busy = hgsl_malloc(usize);
 	if (busy == NULL) {
 		LOGE("failed to allocate memory");
 		ret = -ENOMEM;
@@ -4317,8 +4457,7 @@ static int hgsl_ioctl_gslprofiler_per_proc_gpu_busy(struct file *filep, void *da
 
 	ret = hgsl_hyp_gslprofiler_per_proc_gpu_busy(&priv->hyp_priv, param, busy);
 	if (ret == 0) {
-		if (copy_to_user(USRPTR(param->busy), busy,
-				sizeof(struct gsl_profiler_get_per_proc_gpu_busy_percentage_t))) {
+		if (copy_to_user(USRPTR(param->busy), busy, usize)) {
 			LOGE("failed to copy busy to user");
 			ret = -EFAULT;
 			goto out;
@@ -4335,9 +4474,15 @@ static int hgsl_ioctl_gslprofiler_per_proc_gpu_pmem(struct file *filep, void *da
 	struct hgsl_priv *priv = filep->private_data;
 	struct hgsl_ioctl_gslprofiler_per_proc_gpu_pmem_params *param = data;
 	struct gsl_profiler_get_per_proc_gpu_pmem_usage_t *pmem = NULL;
+	uint32_t usize = sizeof(*pmem);
 	int ret = 0;
 
-	pmem = hgsl_malloc(sizeof(struct gsl_profiler_get_per_proc_gpu_pmem_usage_t));
+	if (hgsl_check_userparams(param->pmem, usize)) {
+		LOGE("invalid input pmem data (0x%llx)", param->pmem);
+		return -EINVAL;
+	}
+
+	pmem = hgsl_malloc(usize);
 	if (pmem == NULL) {
 		LOGE("failed to allocate memory");
 		ret = -ENOMEM;
@@ -4346,8 +4491,7 @@ static int hgsl_ioctl_gslprofiler_per_proc_gpu_pmem(struct file *filep, void *da
 
 	ret = hgsl_hyp_gslprofiler_per_proc_gpu_pmem(&priv->hyp_priv, param, pmem);
 	if (ret == 0) {
-		if (copy_to_user(USRPTR(param->pmem), pmem,
-				sizeof(struct gsl_profiler_get_per_proc_gpu_pmem_usage_t))) {
+		if (copy_to_user(USRPTR(param->pmem), pmem, usize)) {
 			LOGE("failed to copy pmem to user");
 			ret = -EFAULT;
 			goto out;
@@ -5054,7 +5198,6 @@ static void release_of(struct device *dev, void *data)
 
 static const struct of_device_id hgsl_component_match[] = {
 	{.compatible = "qcom,hgsl-smmu-v2"},
-	{.compatible = "qcom,smmu-hgsl-cb"},
 	{},
 };
 
@@ -5071,7 +5214,6 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	hgsl_dev->dev = &pdev->dev;
-	platform_set_drvdata(pdev, hgsl_dev);
 
 	ret = qcom_hgsl_register(pdev, hgsl_dev);
 	if (ret < 0) {
@@ -5080,6 +5222,7 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	platform_set_drvdata(pdev, hgsl_dev);
 	ret = hgsl_init_context(hgsl_dev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "hgsl_init_context failed, ret %d\n",
@@ -5088,8 +5231,9 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 	}
 
 	INIT_LIST_HEAD(&hgsl_dev->active_list);
-
 	INIT_LIST_HEAD(&hgsl_dev->active_wait_list);
+	INIT_LIST_HEAD(&hgsl_dev->destroying_ctx_list);
+	mutex_init(&hgsl_dev->destroying_ctx_list_lock);
 	spin_lock_init(&hgsl_dev->active_wait_lock);
 
 	ret = hgsl_init_release_wq(hgsl_dev);
@@ -5171,11 +5315,20 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 					hgsl_dev->device_handle[i], i);
 	}
 
-
 	hgsl_dev->cache_flags.default_iocoherency = of_property_read_bool(pdev->dev.of_node,
 							"default_iocoherency");
 	hgsl_dev->cache_flags.writecombine_enable = of_property_read_bool(pdev->dev.of_node,
 							"writecombine_enable");
+
+	/* Skip cache ops when IO coherency is enabled by default */
+	hgsl_dev->cache_flags.skip_cache_ops =
+		hgsl_dev->cache_flags.default_iocoherency &&
+		hgsl_is_iocoherent_gpu(hgsl_dev->chip_id);
+
+	LOGI("chip_id=0x%08x default_iocoherency=%d skip_cache_ops=%d",
+		hgsl_dev->chip_id,
+		hgsl_dev->cache_flags.default_iocoherency,
+		hgsl_dev->cache_flags.skip_cache_ops);
 
 	if (hgsl_dev->fv_on) {
 		for_each_matching_node(node, hgsl_component_match) {
@@ -5224,6 +5377,8 @@ exit_dereg:
 
 	hgsl_close_gsl_device_lib(hgsl_dev);
 	qcom_hgsl_deregister(pdev);
+	if (dev_get_drvdata(&pdev->dev) == hgsl_dev)
+		dev_set_drvdata(&pdev->dev, NULL);
 	return ret;
 }
 
@@ -5233,6 +5388,9 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 	struct hgsl_tcsr *tcsr_sender, *tcsr_receiver;
 	struct hgsl_gmugos *gmugos;
 	int i, j;
+
+	if (!hgsl)
+		goto out;
 
 	hgsl_dispatch_deinit(hgsl);
 
@@ -5288,6 +5446,8 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 
 	mutex_destroy(&hgsl->mutex);
 	qcom_hgsl_deregister(pdev);
+
+out:
 	return 0;
 }
 
@@ -5320,17 +5480,21 @@ static int __init hgsl_init(void)
 {
 	int err;
 
-	err = hgsl_mmu_init();
-	if (err) {
-		pr_err("Failed to register hgsl mmu sub driver: %d\n", err);
-		goto exit;
-	}
+	hgsl_mem_node_cache_init();
+	hgsl_sync_cache_init();
+
+	/* Register qcom_hgsl_driver first so that it can get FV status  */
 	err = platform_driver_register(&qcom_hgsl_driver);
 	if (err) {
 		pr_err("Failed to register hgsl driver: %d\n", err);
-		hgsl_mmu_exit();
+		hgsl_sync_cache_destroy();
+		hgsl_mem_node_cache_destroy();
 		goto exit;
 	}
+
+	err = hgsl_mmu_init();
+	if (err)
+		pr_err("Failed to register hgsl mmu sub driver: %d\n", err);
 
 #if IS_ENABLED(CONFIG_QCOM_HGSL_TCSR_SIGNAL)
 	err = platform_driver_register(&hgsl_tcsr_driver);
@@ -5349,6 +5513,8 @@ static void __exit hgsl_exit(void)
 {
 	hgsl_mmu_exit();
 	platform_driver_unregister(&qcom_hgsl_driver);
+	hgsl_sync_cache_destroy();
+	hgsl_mem_node_cache_destroy();
 #if IS_ENABLED(CONFIG_QCOM_HGSL_TCSR_SIGNAL)
 	platform_driver_unregister(&hgsl_tcsr_driver);
 #endif

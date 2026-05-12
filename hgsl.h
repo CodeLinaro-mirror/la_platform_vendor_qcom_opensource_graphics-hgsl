@@ -200,7 +200,7 @@ struct hgsl_event {
 	hgsl_event_func func;
 	void *priv;
 	struct list_head node;
-	u32 created;
+	u64 created;
 	struct kthread_work work;
 	int result;
 	struct hgsl_event_group *group;
@@ -283,6 +283,7 @@ struct qcom_hgsl {
 	spinlock_t isync_timeline_lock;
 	atomic64_t total_mem_size;
 	struct hgsl_cache_flags cache_flags;
+	uint32_t chip_id;
 
 	struct hgsl_init_param_t ipcq_settings[HGSL_DEVICE_NUM];
 	struct hgsl_gvm_settings gvm_settings[HGSL_DEVICE_NUM];
@@ -307,6 +308,9 @@ struct qcom_hgsl {
 	struct dentry *debugfs;
 	struct dentry *clients_debugfs;
 	struct dentry *debugfs_stat;
+	struct mutex destroying_ctx_list_lock;
+	struct list_head destroying_ctx_list;
+
 	/* HFI message queues */
 	void *PKMD2HGSL_queue[HGSL_DEVICE_NUM];
 	void *GMU2HGSL_queue[HGSL_DEVICE_NUM];
@@ -352,7 +356,7 @@ struct hgsl_context {
 	uint32_t db_signal;
 
 	/* Dispatcher */
-	spinlock_t drawq_lock;
+	struct rt_mutex drawq_lock;
 	struct hgsl_drawobj *drawq[CONTEXT_DRAWQUEUE_SIZE];
 	unsigned int drawq_head;
 	unsigned int drawq_tail;
@@ -365,6 +369,7 @@ struct hgsl_context {
 	struct hgsl_event_group event_group;
 
 	struct hgsl_mem_node *ctxt_record_mem_node;
+	struct list_head node;
 };
 
 struct hgsl_priv {
@@ -413,6 +418,25 @@ struct hgsl_memobj_node {
 	uint64_t size;
 	unsigned long flags;
 	unsigned long priv;
+};
+
+/**
+ * struct ctx_queue_header - Header of the per-context doorbell command queue
+ * (DBCQ).  The queue body immediately follows this header in memory.
+ */
+struct ctx_queue_header {
+	uint32_t version;          /* Version of the context queue header */
+	uint32_t startAddr;        /* GMU VA of start of queue */
+	uint32_t dwSize;           /* Queue size in dwords */
+	uint32_t outFenceTs;       /* Timestamp of the last output hw fence sent to TxQueue */
+	uint32_t syncObjTs;        /* Timestamp of last SYNC object that has been signaled */
+	uint32_t readIdx;          /* Read index of the queue */
+	uint32_t writeIdx;         /* Write index of the queue */
+	uint32_t hwFenceArrayAddr; /* GMU VA of the buffer to store output hw fences */
+	uint32_t hwFenceArraySize; /* Size (bytes) of the buffer to store output hw fences */
+	uint32_t dbqSignal;
+	uint32_t unused0;
+	uint32_t unused1;
 };
 
 static inline bool hgsl_ts32_ge(uint32_t a, uint32_t b)
@@ -665,6 +689,9 @@ struct hgsl_isync_timeline *hgsl_isync_timeline_get(struct hgsl_priv *priv,
 
 void hgsl_isync_timeline_put(struct hgsl_isync_timeline *timeline);
 
+void hgsl_sync_cache_init(void);
+void hgsl_sync_cache_destroy(void);
+
 int hgsl_isync_query(struct hgsl_priv *priv, uint32_t timeline_id,
 							uint64_t *ts);
 int hgsl_isync_wait_multiple(struct hgsl_priv *priv, struct hgsl_timeline_wait *param);
@@ -694,7 +721,49 @@ static inline bool hgsl_check_timestamp(struct hgsl_priv *priv,
 	return hgsl_ts32_ge(retired, timestamp);
 }
 
-void hgsl_get_fence_info(struct hgsl_drawobj_sync_event *event);
+void hgsl_get_fence_name(struct dma_fence *f, char *name, u32 max_size);
+struct event_fence_info;
+int hgsl_fill_fence_info(struct dma_fence *fence, struct event_fence_info *info_ptr);
+struct hgsl_context *hgsl_hsync_fence_get_context(struct dma_fence *fence);
+
+/**
+ * hgsl_hsync_get_name / hgsl_isync_get_name - uniform getter wrappers so
+ * that hgsl_trace() can call them with the same (obj, buf, size) signature
+ * regardless of fence type.
+ */
+static inline void hgsl_hsync_get_name(struct hgsl_hsync_fence *f,
+	char *name, size_t size)
+{
+	hgsl_get_fence_name(&f->fence, name, (u32)size);
+}
+
+static inline void hgsl_isync_get_name(struct hgsl_isync_fence *f,
+	char *name, size_t size)
+{
+	hgsl_get_fence_name(&f->fence, name, (u32)size);
+}
+
+/**
+ * hgsl_trace - guard a trace event behind its enabled() check, build the
+ *              human-readable name string, then fire the event.
+ *
+ * @_trace_fn:  trace function (e.g. trace_hsync_fence_create)
+ * @_get_name:  getter with signature (src, char *buf, size_t size) that
+ *              fills buf; use hgsl_hsync_get_name, hgsl_isync_get_name, or
+ *              hgsl_syncobj_get_fence_names
+ * @_src:       first argument forwarded to @_get_name
+ * @...:        all arguments to @_trace_fn except the trailing name string
+ *
+ * The name string is appended automatically as the last argument.
+ */
+#define hgsl_trace(_trace_fn, _get_name, _src, ...) do {	\
+	if (_trace_fn##_enabled()) {				\
+		char _name[HGSL_FENCE_NAME_LEN * 2];		\
+		_get_name((_src), _name, sizeof(_name));	\
+		_trace_fn(__VA_ARGS__, _name);			\
+	}							\
+} while (0)
+
 int hgsl_issue_drawobj(struct qcom_hgsl *hgsl, struct hgsl_drawobj *drawobj);
 
 int hgsl_events_init(struct qcom_hgsl *hgsl);
@@ -718,4 +787,5 @@ struct hgsl_sync_fence_cb *hgsl_sync_fence_async_wait(int fd, bool (*func)(void 
 void hgsl_sync_fence_async_cancel(struct hgsl_sync_fence_cb *kcb);
 
 void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta);
+bool get_fv_status(struct qcom_hgsl *hgsl, u32 dev_id);
 #endif /* __HGSL_H_ */

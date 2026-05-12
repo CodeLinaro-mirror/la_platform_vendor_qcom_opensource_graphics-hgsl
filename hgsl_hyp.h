@@ -519,6 +519,12 @@ struct device_activate_params {
 	uint32_t                size;
 	uint32_t                devhandle;
 };
+
+struct device_getinfo_params_t {
+	uint32_t                size;
+	uint32_t                devhandle;
+};
+
 struct hgsl_init_param_t {
 	/* All size and offset values are in dword */
 	uint32_t size;
@@ -643,6 +649,20 @@ struct hgsl_ipcq_gvm_state_dump_msg {
 
 #pragma pack(pop)
 
+/*
+ * Mirror of gsl_devinfo_t (gsl_type.h) returned by RPC_DEVICE_GETINFO.
+ * Placed outside #pragma pack so gpuaddr_t (uint64_t) gets natural
+ * 8-byte alignment, giving the correct 32-byte wire size.
+ */
+struct device_getinfo_reply_t {
+	enum gsl_deviceid_t  device_id;
+	uint32_t             chip_id;          /* gsl_chipid_t */
+	int                  mmu_enabled;      /* MMU address translation enabled */
+	uint64_t             gmem_gpubaseaddr; /* gpuaddr_t */
+	uint32_t             gpu_id;           /* gsl_gpuid_t; deprecated */
+	unsigned int         gmem_sizebytes;
+};
+
 struct hgsl_hab_channel_t {
 	struct list_head node;
 	int socket;
@@ -696,6 +716,8 @@ int hgsl_hyp_ctxt_create(struct hgsl_hab_channel_t *hab_channel,
 
 int hgsl_hyp_device_open(struct hgsl_hyp_priv_t *priv,
 		uint32_t flags, enum gsl_deviceid_t device_id, int32_t *rval);
+
+int hgsl_hyp_device_getinfo(struct qcom_hgsl *hgsl, uint32_t *chip_id);
 
 int hgsl_hyp_device_close(struct hgsl_hyp_priv_t *priv,
 		int32_t *rval, enum gsl_devhandle_t devhandle);
