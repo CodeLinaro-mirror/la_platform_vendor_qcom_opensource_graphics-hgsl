@@ -4,6 +4,7 @@
  */
 
 #include "hgsl.h"
+#include "hgsl_debugfs.h"
 #include "hgsl_dispatch.h"
 #include "hgsl_trace.h"
 
@@ -65,6 +66,41 @@ static inline void hgsl_dispatch_requeue_drawobj(
 static bool is_cmdobj(struct hgsl_drawobj *drawobj)
 {
 	return (drawobj->type & CMDOBJ_TYPE);
+}
+
+static DEFINE_RATELIMIT_STATE(_dispatch_warn_rs, 5 * HZ, 3);
+
+static const char *drawobj_type_str(u32 type)
+{
+	switch (type) {
+	case CMDOBJ_TYPE:      return "CMD";
+	case MARKEROBJ_TYPE:   return "MARKER";
+	case SYNCOBJ_TYPE:     return "SYNC";
+	case TIMELINEOBJ_TYPE: return "TL";
+	default:               return "?";
+	}
+}
+
+static void _warn_duplicate_ts(struct hgsl_priv *priv,
+				struct hgsl_context *ctxt,
+				struct hgsl_drawobj **drawobj,
+				u32 count, u32 user_ts)
+{
+	u32 k;
+
+	if (!__ratelimit(&_dispatch_warn_rs))
+		return;
+
+	LOGW("ctx:%d ts %u <= queued_ts %u; batch[%u]:",
+	     ctxt->context_id, user_ts, ctxt->queued_ts, count);
+	for (k = 0; k < count; k++) {
+		struct hgsl_drawobj *obj = drawobj[k];
+
+		LOGW("  [%u] %-7s ts=%u numibs=%u", k,
+		     drawobj_type_str(obj->type), obj->timestamp,
+		     (obj->type & CMDOBJ_TYPE) ? CMDOBJ(obj)->numibs : 0);
+	}
+	hgsl_debugfs_dump_ctxts(&ctxt, 1, priv->dev, false);
 }
 
 static bool _check_context_queue(struct hgsl_context *ctxt, u32 count)
@@ -606,15 +642,34 @@ static void _retire_drawobjs(struct hgsl_context *ctxt)
 	}
 }
 
+static void _warn_reclaim_pending(struct hgsl_context *ctxt)
+{
+	struct hgsl_dispatch_context *dispatch = ctxt->dispatch;
+
+	if (!__ratelimit(&_dispatch_warn_rs))
+		return;
+
+	LOGE("ctx:%u [queued_ts=%u processed=%u retired_ts=%u] drawobjs pending",
+	     ctxt->context_id, ctxt->queued_ts,
+	     ctxt->event_group.processed,
+	     get_context_retired_ts(ctxt));
+	hgsl_debugfs_dump_ctxts(&ctxt, 1, dispatch->hgsl, false);
+}
+
 void hgsl_reclaim_drawobjs(struct hgsl_context *ctxt)
 {
 	struct hgsl_dispatch_context *dispatch = ctxt->dispatch;
+	unsigned long deadline = jiffies + msecs_to_jiffies(60000);
 
 	rt_mutex_lock(&dispatch->mutex);
 	while (unlikely(!list_empty(&dispatch->drawobj_list))) {
 		hgsl_process_event_group(dispatch->hgsl, &ctxt->event_group);
 		_retire_drawobjs(ctxt);
 		rt_mutex_unlock(&dispatch->mutex);
+
+		if (time_after(jiffies, deadline))
+			_warn_reclaim_pending(ctxt);
+
 		usleep_range(100, 1000);
 		rt_mutex_lock(&dispatch->mutex);
 	}
@@ -747,8 +802,7 @@ int hgsl_dispatch_queue_cmds(
 		 * issued timestamp in the context
 		 */
 		if (hgsl_ts32_ge(ctxt->queued_ts, user_ts)) {
-			LOGW("ctx:%d next client ts %d isn't greater than current ts %d",
-				ctxt->context_id, user_ts, ctxt->queued_ts);
+			_warn_duplicate_ts(priv, ctxt, drawobj, count, user_ts);
 			ret = -ERANGE;
 			goto out;
 		}
@@ -811,7 +865,7 @@ int hgsl_dispatch_ctxt_init(struct qcom_hgsl *hgsl,
 		goto out;
 	}
 
-	dispatch->worker = kthread_create_worker(0, "hgsl_dispatch_%u_%u",
+	dispatch->worker = kthread_create_worker(0, "hgsl_dp_%u_%u",
 		ctxt->devhandle, ctxt->context_id);
 	if (IS_ERR(dispatch->worker)) {
 		ret = PTR_ERR(dispatch->worker);
