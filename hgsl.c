@@ -23,6 +23,7 @@
 #include <linux/suspend.h>
 #include <linux/component.h>
 #include <linux/delay.h>
+#include <linux/string.h>
 
 #include "hgsl.h"
 #include "hgsl_tcsr.h"
@@ -497,13 +498,13 @@ static int db_queue_wait_freewords(struct doorbell_queue *dbq, uint32_t size)
 		return -EINVAL;
 
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		hard_reset_req = hgsl_dbq_get_state_info((uint32_t *)dbq->vbase,
 			HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 			HGSL_DBQ_CONTEXT_ANY,
 			HGSL_DBQ_HOST_TO_GVM_HARDRESET_REQ);
-
-		/* ensure read is done before comparison */
-		dma_rmb();
 
 		if (hard_reset_req == true) {
 			if (db_get_busy_state(dbq->vbase) == true)
@@ -539,6 +540,9 @@ static int dbcq_queue_wait_freewords(struct doorbell_context_queue *dbcq, uint32
 	unsigned int retry_count = 0;
 
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		if (db_context_queue_freedwords(dbcq) >= size)
 			return 0;
 
@@ -554,13 +558,13 @@ static int db_get_busy_state(void *dbq_base)
 {
 	unsigned int busy_state = false;
 
+	/* ensure read the latest value */
+	dma_rmb();
+
 	busy_state = hgsl_dbq_get_state_info((uint32_t *)dbq_base,
 		HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 		HGSL_DBQ_CONTEXT_ANY,
 		HGSL_DBQ_GVM_TO_HOST_HARDRESET_DISPATCH_IN_BUSY);
-
-	/* ensure read is done before comparison */
-	dma_rmb();
 
 	return busy_state;
 }
@@ -648,6 +652,7 @@ quit:
 	/* let user try again incase we miss to submit */
 	if (-ETIMEDOUT == ret) {
 		LOGE("Timed out to send db msg, try again\n");
+		hgsl_debugfs_dump_ctxts(&ctxt, 1, hgsl, false);
 		ret = -EAGAIN;
 	}
 	return ret;
@@ -678,13 +683,13 @@ static int db_send_msg(struct hgsl_priv	 *priv,
 
 	cmds = (struct hgsl_db_cmds *)msg_req->ptr_data;
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		hard_reset_req = hgsl_dbq_get_state_info((uint32_t *)dbq->vbase,
 			HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 			HGSL_DBQ_CONTEXT_ANY,
 			HGSL_DBQ_HOST_TO_GVM_HARDRESET_REQ);
-
-		/* ensure read is done before comparison */
-		dma_rmb();
 
 		if (hard_reset_req) {
 			if (msleep_interruptible(1)) {
@@ -3981,14 +3986,84 @@ out:
 	return ret;
 }
 
+
+static int hgsl_get_task_name(struct task_struct *task, char *buf, size_t buf_size)
+{
+	struct mm_struct *mm = NULL;
+	char *arg_buf = NULL;
+	char comm[TASK_COMM_LEN] = { 0 };
+	unsigned long arg_start;
+	unsigned long arg_end;
+	unsigned long len;
+	int ret = 0;
+	int size;
+	int retries = 3;
+
+	if (!task || !buf || !buf_size) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	get_task_comm(comm, task);
+	if (strscpy(buf, comm, buf_size) < 0) {
+		ret = -E2BIG;
+		goto out;
+	}
+
+	arg_buf = hgsl_zalloc(HGSL_PROCESS_NAME_MAX_LEN);
+	if (!arg_buf)
+		goto out;
+
+	mm = get_task_mm(task);
+	if (!mm)
+		goto out;
+
+retry:
+	spin_lock(&mm->arg_lock);
+	arg_start = mm->arg_start;
+	arg_end = mm->arg_end;
+	spin_unlock(&mm->arg_lock);
+
+	if (arg_start >= arg_end)
+		goto out;
+
+	len = arg_end - arg_start;
+	if (len >= HGSL_PROCESS_NAME_MAX_LEN)
+		len = HGSL_PROCESS_NAME_MAX_LEN - 1;
+
+	size = access_process_vm(task, arg_start, arg_buf, len, FOLL_FORCE);
+
+	spin_lock(&mm->arg_lock);
+	if (arg_start != mm->arg_start || arg_end != mm->arg_end) {
+		spin_unlock(&mm->arg_lock);
+		if (--retries > 0)
+			goto retry;
+
+		goto out;
+	}
+	spin_unlock(&mm->arg_lock);
+
+	if (size <= 0)
+		goto out;
+
+	arg_buf[size] = '\0';
+	(void)strscpy(buf, kbasename(arg_buf), buf_size);
+
+out:
+	if (mm)
+		mmput(mm);
+	hgsl_free(arg_buf);
+	return ret;
+}
+
 static int hgsl_open(struct inode *inodep, struct file *filep)
 {
 	struct hgsl_priv *priv = NULL;
-	struct qcom_hgsl  *hgsl = container_of(inodep->i_cdev,
-								struct qcom_hgsl, cdev);
+	struct qcom_hgsl *hgsl = container_of(inodep->i_cdev, struct qcom_hgsl, cdev);
 	struct pid *pid = task_tgid(current);
 	struct task_struct *task = pid_task(pid, PIDTYPE_PID);
 	pid_t pid_nr;
+	char task_name[HGSL_PROCESS_NAME_MAX_LEN] = { 0 };
 	int ret = 0;
 
 	if (!task)
@@ -4016,8 +4091,12 @@ static int hgsl_open(struct inode *inodep, struct file *filep)
 	mutex_init(&priv->lock);
 	mutex_init(&priv->sgt_lock);
 
-	ret = hgsl_hyp_init(&priv->hyp_priv, hgsl->dev,
-		priv->pid, task->comm);
+	ret = hgsl_get_task_name(task, task_name, sizeof(task_name));
+	if (ret != 0) {
+		LOGW("Failed to get process name, ret = %d", ret);
+	}
+
+	ret = hgsl_hyp_init(&priv->hyp_priv, hgsl->dev, priv->pid, task_name);
 	if (ret != 0)
 		goto out;
 
@@ -4029,6 +4108,7 @@ static int hgsl_open(struct inode *inodep, struct file *filep)
 	list_add(&priv->node, &hgsl->active_list);
 	hgsl_sysfs_client_init(priv);
 	hgsl_debugfs_client_init(priv);
+
 out:
 	if (ret != 0)
 		kfree(priv);
