@@ -753,6 +753,12 @@ void hgsl_sharedmem_free(struct hgsl_mem_node *mem_node)
 	hgsl_put_sgt(mem_node, true);
 
 	if (mem_node->dma_buf) {
+		if (mem_node->kva_map.vaddr) {
+			dma_buf_vunmap_unlocked(mem_node->dma_buf, &mem_node->kva_map);
+			mem_node->kva_map.vaddr = NULL;
+		}
+
+		dma_buf_end_cpu_access(mem_node->dma_buf, DMA_BIDIRECTIONAL);
 		dma_buf_put(mem_node->dma_buf);
 	} else {
 		hgsl_mem_free_actual(mem_node);
