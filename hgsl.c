@@ -1017,6 +1017,7 @@ static void hgsl_dbcq_close(struct hgsl_context *ctxt)
 			}
 			dma_buf_end_cpu_access(dbcq->queue_mem->dma_buf,
 						   DMA_BIDIRECTIONAL);
+			dbcq->queue_mem->kva_map.vaddr = NULL;
 		}
 		hgsl_sharedmem_free(dbcq->queue_mem);
 	}
@@ -1067,7 +1068,12 @@ static int hgsl_dbcq_open(struct hgsl_priv *priv,
 		goto err;
 	}
 
-	dma_buf_begin_cpu_access(dbcq->queue_mem->dma_buf, DMA_BIDIRECTIONAL);
+	ret = dma_buf_begin_cpu_access(dbcq->queue_mem->dma_buf, DMA_BIDIRECTIONAL);
+	if (ret) {
+		LOGE("failed to begin dbcq access");
+		goto err;
+	}
+
 	ret = dma_buf_vmap_unlocked(dbcq->queue_mem->dma_buf, &dbcq->map);
 	if (ret) {
 		LOGE("failed to map dbq buffer");
@@ -1163,7 +1169,11 @@ static int hgsl_init_ipcq_memnode(struct qcom_hgsl *hgsl, int allocate_size,
 		goto err;
 	}
 
-	dma_buf_begin_cpu_access(node->dma_buf, DMA_BIDIRECTIONAL);
+	ret = dma_buf_begin_cpu_access(node->dma_buf, DMA_BIDIRECTIONAL);
+	if (ret) {
+		LOGE("failed to begin ipcq access");
+		goto err;
+	}
 	ret = dma_buf_vmap_unlocked(node->dma_buf, &(hgsl->ipcq_memnode_vmap[dev_idx][q_type]));
 	if (ret) {
 		LOGE("failed to map node buffer");
@@ -1755,7 +1765,9 @@ static int hgsl_dbq_init(struct qcom_hgsl *hgsl,
 	dbq->ibdesc_max_size = hgsl->dbq_info[dbq_idx].ibdesc_max_size;
 	atomic_set(&dbq->seq_num, 0);
 
-	dma_buf_begin_cpu_access(dbq->dma, DMA_BIDIRECTIONAL);
+	ret = dma_buf_begin_cpu_access(dbq->dma, DMA_BIDIRECTIONAL);
+	if (ret)
+		goto err;
 	ret = dma_buf_vmap_unlocked(dbq->dma, &dbq->map);
 	if (ret)
 		goto err;
@@ -1798,6 +1810,8 @@ static void _cleanup_shadow(struct hgsl_hab_channel_t *hab_channel,
 		if (ctxt->shadow_ts) {
 			dma_buf_vunmap_unlocked(mem_node->dma_buf, &ctxt->map);
 			ctxt->shadow_ts = NULL;
+			mem_node->kva_map.vaddr = NULL;
+			ctxt->map.vaddr = NULL;
 		}
 		dma_buf_end_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
 	}
@@ -1952,7 +1966,9 @@ static void hgsl_get_shadowts_mem(struct hgsl_hab_channel_t *hab_channel,
 
 	dma_buf = ctxt->shadow_ts_node->dma_buf;
 	if (dma_buf) {
-		dma_buf_begin_cpu_access(dma_buf, DMA_FROM_DEVICE);
+		ret = dma_buf_begin_cpu_access(dma_buf, DMA_FROM_DEVICE);
+		if (ret)
+			goto out;
 		ret = dma_buf_vmap_unlocked(dma_buf, &ctxt->map);
 		if (ret)
 			goto out;
