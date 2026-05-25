@@ -4,6 +4,7 @@
  */
 
 #include "hgsl.h"
+#include "hgsl_debugfs.h"
 #include "hgsl_dispatch.h"
 #include "hgsl_trace.h"
 
@@ -23,6 +24,9 @@ static u32 _context_queue_wait = 10000;
 /* Use a kmem cache to speed up allocations for inflight command objects */
 static struct kmem_cache *obj_cache;
 
+static void hgsl_syncobj_get_fence_names(struct hgsl_drawobj_sync *syncobj,
+	char *buf, size_t buf_size);
+
 /**
  * hgsl_dispatch_requeue_drawobj() - Put a draw objet back on the context
  * queue
@@ -39,7 +43,7 @@ static inline void hgsl_dispatch_requeue_drawobj(
 {
 	u32 prev;
 
-	spin_lock(&ctxt->drawq_lock);
+	rt_mutex_lock(&ctxt->drawq_lock);
 
 	prev = ctxt->drawq_head == 0 ? (CONTEXT_DRAWQUEUE_SIZE - 1) :
 		(ctxt->drawq_head - 1);
@@ -56,7 +60,7 @@ static inline void hgsl_dispatch_requeue_drawobj(
 
 	/* Reset the command queue head to reflect the newly requeued change */
 	ctxt->drawq_head = prev;
-	spin_unlock(&ctxt->drawq_lock);
+	rt_mutex_unlock(&ctxt->drawq_lock);
 }
 
 static bool is_cmdobj(struct hgsl_drawobj *drawobj)
@@ -64,18 +68,65 @@ static bool is_cmdobj(struct hgsl_drawobj *drawobj)
 	return (drawobj->type & CMDOBJ_TYPE);
 }
 
+static DEFINE_RATELIMIT_STATE(_dispatch_warn_rs, 5 * HZ, 3);
+
+static const char *drawobj_type_str(u32 type)
+{
+	switch (type) {
+	case CMDOBJ_TYPE:      return "CMD";
+	case MARKEROBJ_TYPE:   return "MARKER";
+	case SYNCOBJ_TYPE:     return "SYNC";
+	case TIMELINEOBJ_TYPE: return "TL";
+	default:               return "?";
+	}
+}
+
+static void _warn_duplicate_ts(struct hgsl_priv *priv,
+				struct hgsl_context *ctxt,
+				struct hgsl_drawobj **drawobj,
+				u32 count, u32 user_ts)
+{
+	u32 k;
+
+	if (!__ratelimit(&_dispatch_warn_rs))
+		return;
+
+	LOGW("ctx:%d ts %u <= queued_ts %u; batch[%u]:",
+	     ctxt->context_id, user_ts, ctxt->queued_ts, count);
+	for (k = 0; k < count; k++) {
+		struct hgsl_drawobj *obj = drawobj[k];
+
+		LOGW("  [%u] %-7s ts=%u numibs=%u", k,
+		     drawobj_type_str(obj->type), obj->timestamp,
+		     (obj->type & CMDOBJ_TYPE) ? CMDOBJ(obj)->numibs : 0);
+	}
+	hgsl_debugfs_dump_ctxts(&ctxt, 1, priv->dev, false);
+}
+
 static bool _check_context_queue(struct hgsl_context *ctxt, u32 count)
 {
-	bool ret;
-
-	spin_lock(&ctxt->drawq_lock);
-
-	/* Wake up if there is room in the context*/
-	ret = ((ctxt->queued + count) < _context_drawqueue_size) ? 1 : 0;
-
-	spin_unlock(&ctxt->drawq_lock);
-
-	return ret;
+	/*
+	 * No lock is needed here.  This function is the condition argument of
+	 * wait_event_interruptible_timeout().  The wait_event mechanism
+	 * guarantees that ctxt->queued is read fresh on every evaluation:
+	 *
+	 *  - wake_up_all() includes an smp_mb() before waking waiters, so all
+	 *    writes to queued that precede the wake_up_all() are visible to the
+	 *    woken thread.
+	 *  - prepare_to_wait_event() (called at the top of each wait_event loop
+	 *    iteration) provides a barrier that ensures the condition is
+	 *    re-evaluated with up-to-date values after each wake-up.
+	 *
+	 * A stale read on the very first evaluation is harmless: the dispatcher
+	 * calls wake_up_all() after every modification to queued, so the waiter
+	 * will be re-evaluated promptly with a fresh value.
+	 *
+	 * Taking any lock here would corrupt the TASK_INTERRUPTIBLE state that
+	 * wait_event sets: rt_mutex_lock() sets the task to TASK_UNINTERRUPTIBLE
+	 * while waiting for the lock, then restores TASK_RUNNING, causing
+	 * schedule_timeout() to return immediately without sleeping.
+	 */
+	return (ctxt->queued + count) < _context_drawqueue_size;
 }
 
 static void _pop_drawobj(struct hgsl_context *ctxt)
@@ -85,12 +136,43 @@ static void _pop_drawobj(struct hgsl_context *ctxt)
 	ctxt->queued--;
 }
 
+static void hgsl_syncobj_get_fence_names(struct hgsl_drawobj_sync *syncobj,
+	char *buf, size_t buf_size)
+{
+	int i, j;
+	size_t len = 0;
+
+	buf[0] = '\0';
+	if (!syncobj->synclist)
+		return;
+	for (i = 0; i < syncobj->numsyncs; i++) {
+		struct hgsl_drawobj_sync_event *event = &syncobj->synclist[i];
+
+		if (event->type == HGSL_CMD_SYNCPOINT_TYPE_FENCE) {
+			struct event_fence_info *info = event->priv;
+
+			for (j = 0; info && j < info->num_fences; j++)
+				len += scnprintf(buf + len, buf_size - len,
+					"%s%s", len ? "," : "",
+					info->fences[j].name);
+		} else if (event->type == HGSL_CMD_SYNCPOINT_TYPE_TIMELINE) {
+			struct event_timeline_info *info = event->priv;
+
+			for (j = 0; info && info[j].timeline; j++)
+				len += scnprintf(buf + len, buf_size - len,
+					"%stl_%u:%llu", len ? "," : "",
+					info[j].timeline, info[j].seqno);
+		}
+	}
+}
+
 static int _retire_syncobj(struct qcom_hgsl *hgsl,
 	struct hgsl_drawobj_sync *syncobj, struct hgsl_context *ctxt)
 {
 
 	if (!hgsl_drawobj_events_pending(syncobj)) {
-		trace_syncobj_retired(syncobj);
+		hgsl_trace(trace_syncobj_retired,
+			hgsl_syncobj_get_fence_names, syncobj, syncobj);
 		_pop_drawobj(ctxt);
 		hgsl_drawobj_destroy(DRAWOBJ(syncobj));
 		return 0;
@@ -130,11 +212,19 @@ static bool _marker_expired(struct hgsl_drawobj_cmd *markerobj)
 	return expired;
 }
 
-/* Only retire the timestamp. The drawobj will be destroyed later */
+/* Only retire the timestamp. The drawobj will be destroyed later. */
 static void _retire_timestamp_only(struct hgsl_drawobj *drawobj)
 {
 	struct qcom_hgsl *hgsl = drawobj->priv->dev;
 	struct hgsl_context *ctxt = drawobj->context;
+
+	/*
+	 * shadow_ts must be available for local marker retirement.
+	 * When shadow_ts is NULL the marker is sent to the GPU instead of
+	 * being retired locally, so this function is never reached.
+	 */
+	if (!ctxt || !ctxt->shadow_ts)
+		return;
 
 	set_context_shadow_ts(ctxt, GSL_TIMESTAMP_CONSUMED,
 		drawobj->timestamp);
@@ -143,6 +233,8 @@ static void _retire_timestamp_only(struct hgsl_drawobj *drawobj)
 
 	/* Retire pending GPU events for the object */
 	hgsl_process_event_group(hgsl, &ctxt->event_group);
+
+	wake_up_all(&ctxt->wait_q);
 }
 
 static void _retire_timestamp(struct hgsl_drawobj *drawobj)
@@ -173,7 +265,7 @@ static int _retire_markerobj(struct qcom_hgsl *hgsl,
 	 * until the dependent timestamp expires
 	 */
 
-	return test_bit(CMDOBJ_SKIP, &cmdobj->priv) ? 1 : 0;
+	return test_bit(CMDOBJ_SKIP, &cmdobj->priv) ? 1 : -EAGAIN;
 }
 
 static int _retire_timelineobj(struct hgsl_drawobj *drawobj,
@@ -199,13 +291,13 @@ static int _sendcmd(struct qcom_hgsl *hgsl,
 	int ret;
 	struct cmd_obj *obj;
 
-	obj = kmem_cache_alloc(obj_cache, GFP_KERNEL);
+	obj = HGSL_ZALLOC_CACHED(obj_cache, struct cmd_obj, GFP_KERNEL);
 	if (!obj)
 		return -ENOMEM;
 
 	ret = hgsl_issue_drawobj(hgsl, drawobj);
 	if (ret) {
-		kmem_cache_free(obj_cache, obj);
+		HGSL_FREE_CACHED(obj_cache, obj);
 		return ret;
 	}
 
@@ -214,7 +306,7 @@ static int _sendcmd(struct qcom_hgsl *hgsl,
 
 		/* If this MARKER object is already retired, we can destroy it here */
 		if ((test_bit(CMDOBJ_MARKER_EXPIRED, &cmdobj->priv))) {
-			kmem_cache_free(obj_cache, obj);
+			HGSL_FREE_CACHED(obj_cache, obj);
 			hgsl_drawobj_destroy(drawobj);
 			return 0;
 		}
@@ -305,7 +397,7 @@ static int hgsl_dispatch_sendcmds(struct qcom_hgsl *hgsl,
 	while (1) {
 		struct hgsl_drawobj *drawobj;
 
-		spin_lock(&ctxt->drawq_lock);
+		rt_mutex_lock(&ctxt->drawq_lock);
 		drawobj = _process_drawqueue_get_next_drawobj(hgsl, ctxt);
 
 		/*
@@ -317,22 +409,22 @@ static int hgsl_dispatch_sendcmds(struct qcom_hgsl *hgsl,
 		if (IS_ERR_OR_NULL(drawobj)) {
 			if (IS_ERR(drawobj))
 				ret = PTR_ERR(drawobj);
-			spin_unlock(&ctxt->drawq_lock);
+			rt_mutex_unlock(&ctxt->drawq_lock);
 			break;
 		}
 		_pop_drawobj(ctxt);
-		spin_unlock(&ctxt->drawq_lock);
+		rt_mutex_unlock(&ctxt->drawq_lock);
 
 		ret = _sendcmd(hgsl, drawobj);
 
 		/* On error from _sendcmd() try to requeue the cmdobj. */
 		if (ret) {
 			/*
-			 * TODO: -ENOENT which means that the context has been
-			 * destroyed and there will be no more deliveries from
-			 * here, then destroy the cmdobj.
+			 * Destroy if the context is being torn down rather than
+			 * requeue — requeueing during destroy leaks the context
+			 * kref and prevents hgsl_ctxt_destroy from completing.
 			 */
-			if (ret == -ENOENT)
+			if (ret == -ENOENT || READ_ONCE(ctxt->in_destroy))
 				hgsl_drawobj_destroy(drawobj);
 			else {
 				/*
@@ -350,8 +442,15 @@ static int hgsl_dispatch_sendcmds(struct qcom_hgsl *hgsl,
 	/*
 	 * Wake up any snoozing threads if we have consumed any real commands
 	 * or marker commands and we have room in the context queue.
+	 *
+	 * This is a best-effort hint: a missed wake-up is benign because the
+	 * sleeping thread will be woken by the next dispatch cycle or by the
+	 * _context_queue_wait timeout.  A spurious wake-up is also harmless
+	 * because the woken thread re-evaluates the condition under drawq_lock
+	 * before proceeding.
 	 */
-	if (ctxt->wait_cnt > 0 && _check_context_queue(ctxt, 1))
+	if (ctxt->wait_cnt > 0 &&
+	    (ctxt->queued + 1) < _context_drawqueue_size)
 		wake_up_all(&ctxt->drawq_wq);
 
 	if (!ret)
@@ -372,20 +471,28 @@ static int _check_for_room_in_context_drawq(
 	 * we can only queue up to _context_drawqueue_size - 1 here to make
 	 * sure we never let drawqueue->queued exceed _context_drawqueue_size.
 	 */
-	if ((ctxt->queued + count) > (_context_drawqueue_size - 1)) {
+	/*
+	 * Use a loop (not an if) so the condition is re-checked under
+	 * drawq_lock after every wake-up.  A single wake_up_all() can wake
+	 * multiple waiters simultaneously; without the re-check, two waiters
+	 * could both observe free slots, both proceed, and together overflow
+	 * the queue — triggering the WARN_ON in hgsl_dispatch_requeue_drawobj
+	 * and corrupting the circular buffer.
+	 */
+	while ((ctxt->queued + count) > (_context_drawqueue_size - 1) && !ret) {
 		trace_ctxt_sleep(ctxt);
 		ctxt->wait_cnt++;
-		spin_unlock(&ctxt->drawq_lock);
+		rt_mutex_unlock(&ctxt->drawq_lock);
 
 		if (wait_event_interruptible_timeout(ctxt->drawq_wq,
 			_check_context_queue(ctxt, count),
 			msecs_to_jiffies(_context_queue_wait)) <= 0) {
-			/* No room in drawqueue, drop it, let user decide.*/
+			/* No room in drawqueue, drop it, let user decide. */
 			LOGW("No room in queue for context: %u", ctxt->context_id);
 			ret = -EAGAIN;
 		}
 
-		spin_lock(&ctxt->drawq_lock);
+		rt_mutex_lock(&ctxt->drawq_lock);
 		ctxt->wait_cnt--;
 		trace_ctxt_wake(ctxt);
 	}
@@ -449,7 +556,8 @@ static void _queue_syncobj(struct hgsl_context *ctxt,
 {
 	struct hgsl_drawobj *drawobj = DRAWOBJ(syncobj);
 
-	trace_syncobj_queued(syncobj);
+	hgsl_trace(trace_syncobj_queued,
+		hgsl_syncobj_get_fence_names, syncobj, syncobj);
 
 	*timestamp = 0;
 	drawobj->timestamp = 0;
@@ -474,7 +582,7 @@ static int _queue_markerobj(struct hgsl_context *ctxt,
 	if (ctxt->shadow_ts) {
 		/*
 		 * See if we can fastpath this thing - if nothing is queued
-		 * and nothing is inflight retire without bothering the GPU
+		 * and nothing is inflight retire without bothering the GPU.
 		 */
 		if (!ctxt->queued &&
 			hgsl_ts32_ge(ctxt->event_group.processed,
@@ -532,19 +640,38 @@ static void _retire_drawobjs(struct hgsl_context *ctxt)
 
 		hgsl_drawobj_destroy(drawobj);
 		list_del_init(&obj->node);
-		kmem_cache_free(obj_cache, obj);
+		HGSL_FREE_CACHED(obj_cache, obj);
 	}
+}
+
+static void _warn_reclaim_pending(struct hgsl_context *ctxt)
+{
+	struct hgsl_dispatch_context *dispatch = ctxt->dispatch;
+
+	if (!__ratelimit(&_dispatch_warn_rs))
+		return;
+
+	LOGE("ctx:%u [queued_ts=%u processed=%u retired_ts=%u] drawobjs pending",
+	     ctxt->context_id, ctxt->queued_ts,
+	     ctxt->event_group.processed,
+	     get_context_retired_ts(ctxt));
+	hgsl_debugfs_dump_ctxts(&ctxt, 1, dispatch->hgsl, false);
 }
 
 void hgsl_reclaim_drawobjs(struct hgsl_context *ctxt)
 {
 	struct hgsl_dispatch_context *dispatch = ctxt->dispatch;
+	unsigned long deadline = jiffies + msecs_to_jiffies(60000);
 
 	rt_mutex_lock(&dispatch->mutex);
 	while (unlikely(!list_empty(&dispatch->drawobj_list))) {
 		hgsl_process_event_group(dispatch->hgsl, &ctxt->event_group);
 		_retire_drawobjs(ctxt);
 		rt_mutex_unlock(&dispatch->mutex);
+
+		if (time_after(jiffies, deadline))
+			_warn_reclaim_pending(ctxt);
+
 		usleep_range(100, 1000);
 		rt_mutex_lock(&dispatch->mutex);
 	}
@@ -558,43 +685,37 @@ void hgsl_dispatch_ctxt_schedule(struct hgsl_context *ctxt)
 	kthread_queue_work(dispatch->worker, &dispatch->work);
 }
 
-void hgsl_dispatch_ctxt_issuecmds(
-	struct hgsl_context *ctxt)
+/*
+ * hgsl_dispatch_ctxt_issuecmds - Send pending commands for a context.
+ *
+ * MUST only be called from hgsl_dispatch_ctxt_work(), which clears
+ * dispatch->pending before acquiring the mutex.  Calling this function
+ * from any other site would leave the pending flag set, causing
+ * hgsl_dispatch_queue_context() in the -EAGAIN retry path to see
+ * pending=1 and drop the new reference without scheduling, leaving
+ * the context permanently stuck with no retry scheduled.
+ */
+static void hgsl_dispatch_ctxt_issuecmds(struct hgsl_context *ctxt)
 {
 	struct hgsl_dispatch_context *dispatch = ctxt->dispatch;
 	struct qcom_hgsl *hgsl = dispatch->hgsl;
-	int i, count = atomic_xchg(&dispatch->count, 0);
+	int ret;
 
-	for (i = 0; i < count; i++) {
-		int ret;
+	ret = hgsl_dispatch_sendcmds(hgsl, ctxt);
 
-		if (i > 0) {
-			hgsl_put_context(ctxt);
-			continue;
-		}
+	/*
+	 * If the dispatch queue is full then requeue the job via the
+	 * standard queue path, which handles the pending flag and
+	 * reference counting.  Otherwise the context either successfully
+	 * submitted to the GPU or an unexpected error occurred.
+	 */
+	if (ret == -EINTR || ret == -EAGAIN)
+		hgsl_dispatch_queue_context(ctxt);
+	else if (ret < 0)
+		/* An unexpected error occurred, drop the job */
+		LOGE("sendcmds failed=%d", ret);
 
-		ret = hgsl_dispatch_sendcmds(hgsl, ctxt);
-
-		/*
-		 * If the dispatch queue is full then requeue the job.
-		 * Otherwise the context either successfully submmitted
-		 * to the GPU or another error happened and it should
-		 * re-scheduled.
-		 */
-		if (ret == -EINTR || ret == -EAGAIN) {
-			atomic_inc(&dispatch->count);
-			hgsl_dispatch_ctxt_schedule(ctxt);
-			continue;
-		}
-
-		/*
-		 * If the context had nothing queued or a unexpected error
-		 * occurs then drop the job
-		 */
-		if (ret < 0)
-			LOGE("sendcmds failed=%d", ret);
-		hgsl_put_context(ctxt);
-	}
+	hgsl_put_context(ctxt);
 }
 
 static void hgsl_dispatch_ctxt_work(struct kthread_work *work)
@@ -602,11 +723,17 @@ static void hgsl_dispatch_ctxt_work(struct kthread_work *work)
 	struct hgsl_dispatch_context *dispatch =
 			container_of(work, struct hgsl_dispatch_context, work);
 	struct hgsl_context *ctxt = dispatch->ctxt;
-	rt_mutex_lock(&dispatch->mutex);
 
+	/*
+	 * Clear the pending flag before acquiring the mutex so that
+	 * concurrent callers can schedule a fresh work item if new
+	 * commands arrive while we are waiting for or holding the lock.
+	 */
+	atomic_set(&dispatch->pending, 0);
+
+	rt_mutex_lock(&dispatch->mutex);
 	_retire_drawobjs(ctxt);
 	hgsl_dispatch_ctxt_issuecmds(ctxt);
-
 	rt_mutex_unlock(&dispatch->mutex);
 }
 
@@ -617,10 +744,20 @@ int hgsl_dispatch_queue_context(struct hgsl_context *ctxt)
 	if (!dispatch || !hgsl_context_get(ctxt))
 		return 0;
 
-	trace_dispatch_queue_context(ctxt);
-	atomic_inc(&dispatch->count);
-	hgsl_dispatch_ctxt_schedule(ctxt);
+	/*
+	 * Use dispatch->pending as a flag (0 = idle, 1 = scheduled).
+	 * If a work item is already pending, release the extra reference
+	 * immediately rather than accumulating it for the worker to drain.
+	 * The pending work item will pick up any new draw objects that were
+	 * added to the queue before this call.
+	 */
+	if (atomic_cmpxchg(&dispatch->pending, 0, 1) != 0) {
+		hgsl_put_context(ctxt);
+		return 0;
+	}
 
+	trace_dispatch_queue_context(ctxt);
+	hgsl_dispatch_ctxt_schedule(ctxt);
 	return 0;
 }
 
@@ -643,9 +780,9 @@ int hgsl_dispatch_queue_cmds(
 		return -EINVAL;
 	}
 
-	spin_lock(&ctxt->drawq_lock);
+	rt_mutex_lock(&ctxt->drawq_lock);
 
-	if (unlikely(ctxt->in_destroy)) {
+	if (unlikely(READ_ONCE(ctxt->in_destroy))) {
 		LOGW("ctx:%d is in destroy, skip dispatch.", ctxt->context_id);
 		ret = -EINVAL;
 		goto out;
@@ -667,8 +804,7 @@ int hgsl_dispatch_queue_cmds(
 		 * issued timestamp in the context
 		 */
 		if (hgsl_ts32_ge(ctxt->queued_ts, user_ts)) {
-			LOGW("ctx:%d next client ts %d isn't greater than current ts %d",
-				ctxt->context_id, user_ts, ctxt->queued_ts);
+			_warn_duplicate_ts(priv, ctxt, drawobj, count, user_ts);
 			ret = -ERANGE;
 			goto out;
 		}
@@ -707,11 +843,11 @@ int hgsl_dispatch_queue_cmds(
 			goto out;
 		}
 	}
-	spin_unlock(&ctxt->drawq_lock);
+	rt_mutex_unlock(&ctxt->drawq_lock);
 
 	return hgsl_dispatch_queue_context(ctxt);
 out:
-	spin_unlock(&ctxt->drawq_lock);
+	rt_mutex_unlock(&ctxt->drawq_lock);
 	return ret;
 }
 
@@ -731,7 +867,7 @@ int hgsl_dispatch_ctxt_init(struct qcom_hgsl *hgsl,
 		goto out;
 	}
 
-	dispatch->worker = kthread_create_worker(0, "hgsl_dispatch_%u_%u",
+	dispatch->worker = kthread_create_worker(0, "hgsl_dp_%u_%u",
 		ctxt->devhandle, ctxt->context_id);
 	if (IS_ERR(dispatch->worker)) {
 		ret = PTR_ERR(dispatch->worker);
@@ -745,7 +881,7 @@ int hgsl_dispatch_ctxt_init(struct qcom_hgsl *hgsl,
 	sched_set_fifo(dispatch->worker->task);
 
 	INIT_LIST_HEAD(&dispatch->drawobj_list);
-	atomic_set(&dispatch->count, 0);
+	atomic_set(&dispatch->pending, 0);
 
 	dispatch->hgsl = hgsl;
 	dispatch->ctxt = ctxt;
@@ -793,30 +929,28 @@ int hgsl_dispatch_init(struct qcom_hgsl *hgsl)
 {
 	int ret;
 
-	obj_cache = KMEM_CACHE(cmd_obj, 0);
+	obj_cache = KMEM_CACHE(cmd_obj, SLAB_HWCACHE_ALIGN);
 	if (IS_ERR_OR_NULL(obj_cache)) {
-		LOGE("Failed to allocate obj_cache.\n");
+		LOGW("Failed to allocate obj_cache, falling back to kzalloc.\n");
 		obj_cache = NULL;
-		return -ENOMEM;
 	}
 
-	ret = hgsl_drawobjs_init();
-	if (ret) {
-		LOGE("drawobjs init failed, ret %d\n", ret);
-		goto err;
-	}
+	/* best-effort: cache creation failures fall back to kzalloc */
+	hgsl_drawobjs_init();
 
 	/* Set up the GPU events for the device */
 	ret = hgsl_events_init(hgsl);
 	if (ret) {
 		LOGE("events init failed, ret %d\n", ret);
-		hgsl_drawobjs_deinit();
 		goto err;
 	}
 
 	return 0;
 err:
-	kmem_cache_destroy(obj_cache);
-	obj_cache = NULL;
+	hgsl_drawobjs_deinit();
+	if (!IS_ERR_OR_NULL(obj_cache)) {
+		kmem_cache_destroy(obj_cache);
+		obj_cache = NULL;
+	}
 	return ret;
 }

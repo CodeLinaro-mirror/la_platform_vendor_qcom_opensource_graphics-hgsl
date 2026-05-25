@@ -766,7 +766,11 @@ int hgsl_hyp_init(struct hgsl_hyp_priv_t *priv, struct device *dev,
 
 void hgsl_hyp_close(struct hgsl_hyp_priv_t *priv)
 {
-	hgsl_hyp_channel_pool_close(priv);
+	if (priv->dev) {
+		hgsl_hyp_channel_pool_close(priv);
+	} else {
+		LOGE("Invalid private data, can't close channel pool");
+	}
 }
 
 int hgsl_hyp_generic_transaction(struct hgsl_hyp_priv_t *priv,
@@ -963,6 +967,64 @@ int hgsl_hyp_device_open(struct hgsl_hyp_priv_t *priv,
 
 out:
 	LOGD("%d, %u", ret, *rval);
+	hgsl_hyp_channel_pool_put(hab_channel);
+	RPC_TRACE_DONE();
+	return ret;
+}
+
+int hgsl_hyp_device_getinfo(struct qcom_hgsl *hgsl, uint32_t *chip_id)
+{
+	struct device_getinfo_params_t send_params = { 0 };
+	struct device_getinfo_reply_t reply = { 0 };
+	struct hgsl_hab_channel_t *hab_channel = NULL;
+	struct gsl_hab_payload *send_buf = NULL;
+	struct gsl_hab_payload *recv_buf = NULL;
+	uint32_t dev0_handle = hgsl->device_handle[0];
+	uint32_t dev1_handle = hgsl->device_handle[1];
+	uint32_t devhandle = dev0_handle ? dev0_handle : dev1_handle;
+	int ret = 0;
+
+	RPC_TRACE();
+
+	if (!devhandle) {
+		LOGE("No valid device handle available");
+		return -ENODEV;
+	}
+
+	ret = hgsl_hyp_channel_pool_get(&hgsl->global_hyp, 0, &hab_channel);
+	if (ret) {
+		LOGE("Failed to get hab channel %d", ret);
+		goto out;
+	}
+
+	send_buf = &hab_channel->send_buf;
+	recv_buf = &hab_channel->recv_buf;
+
+	send_params.size      = sizeof(send_params);
+	send_params.devhandle = devhandle;
+
+	ret = gsl_rpc_write(send_buf, &send_params, sizeof(send_params));
+	if (ret) {
+		LOGE("gsl_rpc_write failed, %d", ret);
+		goto out;
+	}
+
+	ret = gsl_rpc_transact(RPC_DEVICE_GETINFO, hab_channel);
+	if (ret) {
+		LOGE("RPC_DEVICE_GETINFO failed, ret %d", ret);
+		goto out;
+	}
+
+	ret = gsl_rpc_read(recv_buf, &reply, sizeof(reply));
+	if (ret) {
+		LOGE("gsl_rpc_read failed, %d", ret);
+		goto out;
+	}
+
+	*chip_id = reply.chip_id;
+	LOGD("chip_id = 0x%08x", *chip_id);
+
+out:
 	hgsl_hyp_channel_pool_put(hab_channel);
 	RPC_TRACE_DONE();
 	return ret;
@@ -2935,7 +2997,8 @@ void hgsl_hyp_deinit_ipcq(struct qcom_hgsl *hgsl, int dev_idx)
 	}
 
 	for (i = 0; i < HGSL_IPCQ_NUM; i++) {
-		if (hgsl->ipcq_memnode[dev_idx][i] && hgsl->ipcq_memnode[dev_idx][i]->dma_buf) {
+		if (hgsl->ipcq_memnode[dev_idx][i] && hgsl->ipcq_memnode[dev_idx][i]->dma_buf
+			&& hgsl->ipcq_memnode[dev_idx][i]->kva_map.vaddr) {
 			dma_buf_vunmap_unlocked(hgsl->ipcq_memnode[dev_idx][i]->dma_buf,
 				&(hgsl->ipcq_memnode_vmap[dev_idx][i]));
 			dma_buf_end_cpu_access(hgsl->ipcq_memnode[dev_idx][i]->dma_buf,
@@ -3215,7 +3278,7 @@ static int read_shadowts_mem_be(struct hgsl_hab_channel_t *hab_channel,
 
 out:
 	if (ret)
-		kfree(mem_node);
+		hgsl_mem_node_free(mem_node);
 
 	return ret;
 }
@@ -3328,7 +3391,7 @@ out:
 		if (ctxt->shadow_ts_node && !ctxt->is_fe_shadow) {
 			hgsl_hyp_put_shadowts_mem(hab_channel,
 							ctxt->shadow_ts_node);
-			kfree(ctxt->shadow_ts_node);
+			hgsl_mem_node_free(ctxt->shadow_ts_node);
 			ctxt->shadow_ts_node = NULL;
 		}
 

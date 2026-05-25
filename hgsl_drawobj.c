@@ -9,6 +9,7 @@
 #include "hgsl.h"
 #include "hgsl_drawobj.h"
 #include "hgsl_dispatch.h"
+#include "hgsl_debugfs.h"
 #include "hgsl_trace.h"
 
 /*
@@ -42,7 +43,7 @@ static void syncobj_destroy_object(struct hgsl_drawobj *drawobj)
 				struct hgsl_sync_fence_cb *kcb = event->handle;
 
 				dma_fence_put(kcb->fence);
-				kfree(kcb);
+				hgsl_free(kcb);
 			}
 
 		} else if (event->type == HGSL_CMD_SYNCPOINT_TYPE_TIMELINE) {
@@ -51,12 +52,12 @@ static void syncobj_destroy_object(struct hgsl_drawobj *drawobj)
 	}
 
 	kfree(syncobj->synclist);
-	kmem_cache_free(syncobjs_cache, syncobj);
+	HGSL_FREE_CACHED(syncobjs_cache, syncobj);
 }
 
 static void cmdobj_destroy_object(struct hgsl_drawobj *drawobj)
 {
-	kmem_cache_free(cmdobjs_cache, CMDOBJ(drawobj));
+	HGSL_FREE_CACHED(cmdobjs_cache, CMDOBJ(drawobj));
 }
 
 static void timelineobj_destroy_object(struct hgsl_drawobj *drawobj)
@@ -82,13 +83,13 @@ static void cmdobj_destroy(struct hgsl_drawobj *drawobj)
 	/* Destroy the command list */
 	list_for_each_entry_safe(mem, tmpmem, &cmdobj->cmdlist, node) {
 		list_del_init(&mem->node);
-		kmem_cache_free(memobjs_cache, mem);
+		HGSL_FREE_CACHED(memobjs_cache, mem);
 	}
 
 	/* Destroy the memory list */
 	list_for_each_entry_safe(mem, tmpmem, &cmdobj->memlist, node) {
 		list_del_init(&mem->node);
-		kmem_cache_free(memobjs_cache, mem);
+		HGSL_FREE_CACHED(memobjs_cache, mem);
 	}
 }
 
@@ -98,6 +99,9 @@ static void syncobj_timer(struct timer_list *t)
 	struct hgsl_drawobj *drawobj;
 	struct hgsl_drawobj_sync_event *event;
 	struct hgsl_context *ctxt;
+	/* +1 for the deadlocked context itself */
+	struct hgsl_context *dump_ctxts[HGSL_MAX_SYNCPOINTS + 1];
+	int ndump = 0;
 	unsigned int i;
 	u32 rts = 0;
 
@@ -117,6 +121,7 @@ static void syncobj_timer(struct timer_list *t)
 	LOGE("hgsl: possible gpu syncpoint deadlock for context %u timestamp %u retired %u queued %u\n",
 		ctxt->context_id, drawobj->timestamp, rts, ctxt->queued_ts);
 	LOGE("      pending events:\n");
+
 	for (i = 0; i < syncobj->numsyncs; i++) {
 		event = &syncobj->synclist[i];
 
@@ -127,14 +132,37 @@ static void syncobj_timer(struct timer_list *t)
 		case HGSL_CMD_SYNCPOINT_TYPE_TIMESTAMP:
 			LOGE("       [%u] TIMESTAMP %u:%u\n",
 				i, event->context->context_id, event->timestamp);
+			if (ndump < ARRAY_SIZE(dump_ctxts))
+				dump_ctxts[ndump++] = event->context;
 			break;
 		case HGSL_CMD_SYNCPOINT_TYPE_FENCE: {
 			int j;
 			struct event_fence_info *info = event->priv;
+			struct hgsl_sync_fence_cb *kcb = event->handle;
 
 			for (j = 0; info && j < info->num_fences; j++)
 				LOGE("       [%u] FENCE %s\n",
 					i, info->fences[j].name);
+
+			/* Collect the hgsl context that owns the fence */
+			if (kcb && kcb->fence) {
+				struct dma_fence *f = kcb->fence;
+				struct dma_fence_array *arr =
+					to_dma_fence_array(f);
+				struct dma_fence **fences =
+					arr ? arr->fences : &f;
+				int nf = arr ? (int)arr->num_fences : 1;
+				int k;
+
+				for (k = 0; k < nf &&
+				     ndump < ARRAY_SIZE(dump_ctxts); k++) {
+					struct hgsl_context *fence_ctxt =
+						hgsl_hsync_fence_get_context(
+							fences[k]);
+					if (fence_ctxt)
+						dump_ctxts[ndump++] = fence_ctxt;
+				}
+			}
 			break;
 		}
 		case HGSL_CMD_SYNCPOINT_TYPE_TIMELINE: {
@@ -155,8 +183,7 @@ static void syncobj_timer(struct timer_list *t)
 				str = "signaled";
 			else if (retired && !signaled)
 				str = "retired but not signaled";
-			LOGE("       [%u] FENCE %s\n",
-				i, str);
+			LOGE("       [%u] FENCE %s\n", i, str);
 			for (j = 0; info && info[j].timeline; j++)
 				LOGE("       TIMELINE %d SEQNO %lld\n",
 					info[j].timeline, info[j].seqno);
@@ -164,6 +191,13 @@ static void syncobj_timer(struct timer_list *t)
 		}
 		}
 	}
+
+	/* Always include the deadlocked context itself */
+	if (ndump < ARRAY_SIZE(dump_ctxts))
+		dump_ctxts[ndump++] = ctxt;
+
+	/* Dump all collected contexts + waiting + destroying contexts */
+	hgsl_debugfs_dump_ctxts(dump_ctxts, ndump, ctxt->priv->dev, true);
 
 	hgsl_drawobj_put(drawobj);
 	LOGE("--gpu syncpoint deadlock print end--\n");
@@ -260,11 +294,17 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 	if (WARN_ON(!hgsl_context_get(ctxt)))
 		return;
 
+	/* Early return if no dispatch context */
+	if (!ctxt->dispatch) {
+		hgsl_put_context(ctxt);
+		return;
+	}
+
 	wake_up_all(&ctxt->drawq_wq);
 	trace_ctxt_detach_drawobjs(ctxt);
 
 	hgsl_flush_event_group(hgsl, &ctxt->event_group);
-	spin_lock(&ctxt->drawq_lock);
+	rt_mutex_lock(&ctxt->drawq_lock);
 	while (ctxt->drawq_head != ctxt->drawq_tail) {
 		struct hgsl_drawobj *drawobj =
 			ctxt->drawq[ctxt->drawq_head];
@@ -274,7 +314,7 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 
 		list[count++] = drawobj;
 	}
-	spin_unlock(&ctxt->drawq_lock);
+	rt_mutex_unlock(&ctxt->drawq_lock);
 
 	for (i = 0; i < count; i++) {
 		hgsl_cancel_events_timestamp(hgsl, &ctxt->event_group,
@@ -282,11 +322,9 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 		hgsl_drawobj_destroy(list[i]);
 	}
 
-	if (ctxt->dispatch) {
-		hgsl_dispatch_ctxt_schedule(ctxt);
-		kthread_flush_worker(ctxt->dispatch->worker);
-		hgsl_reclaim_drawobjs(ctxt);
-	}
+	hgsl_dispatch_queue_context(ctxt);
+	kthread_flush_worker(ctxt->dispatch->worker);
+	hgsl_reclaim_drawobjs(ctxt);
 	hgsl_put_context(ctxt);
 }
 
@@ -294,6 +332,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 {
 	struct hgsl_drawobj_sync *syncobj = SYNCOBJ(drawobj);
 	unsigned int i;
+	bool cancelled = false;
 
 	/* Zap the canary timer */
 	del_timer_sync(&syncobj->timer);
@@ -302,7 +341,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 	 * Clear all pending events - this will render any subsequent async
 	 * callbacks harmless
 	 */
-	for (i = 0; i < syncobj->numsyncs; i++) {
+	for (i = 0; i < syncobj->numsyncs && i < HGSL_MAX_SYNCPOINTS; i++) {
 		struct hgsl_drawobj_sync_event *event = &syncobj->synclist[i];
 
 		/*
@@ -313,6 +352,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 		if (!test_and_clear_bit(i, &syncobj->pending))
 			continue;
 
+		cancelled = true;
 		switch (event->type) {
 		case HGSL_CMD_SYNCPOINT_TYPE_TIMESTAMP:
 			hgsl_cancel_event(drawobj->priv->dev,
@@ -340,7 +380,7 @@ static void syncobj_destroy(struct hgsl_drawobj *drawobj)
 	 * If we cancelled an event, there's a good chance that the context is
 	 * on a dispatcher queue, so schedule to get it removed.
 	 */
-	if (!bitmap_empty(&syncobj->pending, HGSL_MAX_SYNCPOINTS))
+	if (cancelled)
 		hgsl_dispatch_queue_context(drawobj->context);
 }
 
@@ -617,7 +657,7 @@ struct hgsl_drawobj_sync *hgsl_drawobj_sync_create(
 	struct hgsl_context *ctxt)
 {
 	struct hgsl_drawobj_sync *syncobj =
-		kmem_cache_alloc(syncobjs_cache, GFP_KERNEL | __GFP_ZERO);
+		HGSL_ZALLOC_CACHED(syncobjs_cache, struct hgsl_drawobj_sync, GFP_KERNEL);
 	int ret;
 
 	if (!syncobj)
@@ -625,7 +665,7 @@ struct hgsl_drawobj_sync *hgsl_drawobj_sync_create(
 
 	ret = drawobj_init(hgsl_priv, ctxt, &syncobj->base, SYNCOBJ_TYPE);
 	if (ret) {
-		kmem_cache_free(syncobjs_cache, syncobj);
+		HGSL_FREE_CACHED(syncobjs_cache, syncobj);
 		return ERR_PTR(ret);
 	}
 
@@ -645,7 +685,7 @@ struct hgsl_drawobj_cmd *hgsl_drawobj_cmd_create(
 	u64 flags, u32 type)
 {
 	struct hgsl_drawobj_cmd *cmdobj =
-		kmem_cache_alloc(cmdobjs_cache, GFP_KERNEL | __GFP_ZERO);
+		HGSL_ZALLOC_CACHED(cmdobjs_cache, struct hgsl_drawobj_cmd, GFP_KERNEL);
 	int ret;
 
 	if (!cmdobj)
@@ -654,7 +694,7 @@ struct hgsl_drawobj_cmd *hgsl_drawobj_cmd_create(
 	ret = drawobj_init(hgsl_priv, ctxt, &cmdobj->base,
 		(type & (CMDOBJ_TYPE | MARKEROBJ_TYPE)));
 	if (ret) {
-		kmem_cache_free(cmdobjs_cache, cmdobj);
+		HGSL_FREE_CACHED(cmdobjs_cache, cmdobj);
 		return ERR_PTR(ret);
 	}
 
@@ -855,12 +895,28 @@ static int drawobj_add_sync_fence(struct hgsl_priv *hgsl_priv,
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 
+	/*
+	 * Populate fence info before async_wait so the names are available
+	 * even when the fence is already signaled at queue time (in which
+	 * case async_wait returns NULL and we return early below).
+	 */
+	if (priv) {
+		struct dma_fence *f = sync_file_get_fence(sync_fence.fd);
+
+		if (f) {
+			if (hgsl_fill_fence_info(f, priv)) {
+				kfree(priv);
+				priv = NULL;
+			}
+			dma_fence_put(f);
+		}
+	}
+	event->priv = priv;
+
 	set_bit(event->id, &syncobj->pending);
 
 	event->handle = hgsl_sync_fence_async_wait(sync_fence.fd,
 		drawobj_sync_fence_func, event);
-
-	event->priv = priv;
 
 	if (IS_ERR_OR_NULL(event->handle)) {
 		int ret = PTR_ERR(event->handle);
@@ -878,8 +934,6 @@ static int drawobj_add_sync_fence(struct hgsl_priv *hgsl_priv,
 
 		return ret;
 	}
-
-	hgsl_get_fence_info(event);
 
 	for (i = 0; priv && i < priv->num_fences; i++)
 		trace_syncpoint_fence(syncobj, priv->fences[i].name);
@@ -984,7 +1038,7 @@ static int hgsl_drawobj_add_memobject(struct list_head *head,
 {
 	struct hgsl_memobj_node *mem;
 
-	mem = kmem_cache_alloc(memobjs_cache, GFP_KERNEL);
+	mem = HGSL_ZALLOC_CACHED(memobjs_cache, struct hgsl_memobj_node, GFP_KERNEL);
 	if (mem == NULL)
 		return -ENOMEM;
 
@@ -1167,37 +1221,23 @@ void hgsl_drawobjs_deinit(void)
 	}
 }
 
-int hgsl_drawobjs_init(void)
+void hgsl_drawobjs_init(void)
 {
-	int ret = 0;
-
-	memobjs_cache = KMEM_CACHE(hgsl_memobj_node, 0);
+	memobjs_cache = KMEM_CACHE(hgsl_memobj_node, SLAB_HWCACHE_ALIGN);
 	if (IS_ERR_OR_NULL(memobjs_cache)) {
-		LOGE("Failed to allocate memobjs_cache.\n");
+		LOGW("Failed to allocate memobjs_cache, falling back to kzalloc.\n");
 		memobjs_cache = NULL;
-		return -ENOMEM;
 	}
 
-	cmdobjs_cache = KMEM_CACHE(hgsl_drawobj_cmd, 0);
+	cmdobjs_cache = KMEM_CACHE(hgsl_drawobj_cmd, SLAB_HWCACHE_ALIGN);
 	if (IS_ERR_OR_NULL(cmdobjs_cache)) {
-		LOGE("Failed to allocate cmdobjs_cache.\n");
-		ret = -ENOMEM;
-		goto err;
+		LOGW("Failed to allocate cmdobjs_cache, falling back to kzalloc.\n");
+		cmdobjs_cache = NULL;
 	}
 
-	syncobjs_cache = KMEM_CACHE(hgsl_drawobj_sync, 0);
+	syncobjs_cache = KMEM_CACHE(hgsl_drawobj_sync, SLAB_HWCACHE_ALIGN);
 	if (IS_ERR_OR_NULL(syncobjs_cache)) {
-		LOGE("Failed to allocate syncobjs_cache.\n");
-		kmem_cache_destroy(cmdobjs_cache);
-		ret = -ENOMEM;
-		goto err;
+		LOGW("Failed to allocate syncobjs_cache, falling back to kzalloc.\n");
+		syncobjs_cache = NULL;
 	}
-
-	return 0;
-err:
-	kmem_cache_destroy(memobjs_cache);
-	memobjs_cache = NULL;
-	cmdobjs_cache = NULL;
-	syncobjs_cache = NULL;
-	return ret;
 }
