@@ -916,10 +916,10 @@ int hgsl_iommu_bind(struct platform_device *pdev, struct qcom_hgsl *hgsl_dev)
 #ifdef CONFIG_PER_PROCESS_PT
 	/* Create a kmem cache for the pagetable address objects */
 	if (!addr_entry_cache) {
-		addr_entry_cache = KMEM_CACHE(hgsl_iommu_addr_entry, 0);
-		if (!addr_entry_cache) {
-			ret = -ENOMEM;
-			goto err;
+		addr_entry_cache = KMEM_CACHE(hgsl_iommu_addr_entry, SLAB_HWCACHE_ALIGN);
+		if (IS_ERR_OR_NULL(addr_entry_cache)) {
+			LOGW("Failed to allocate addr_entry_cache, falling back to kzalloc.\n");
+			addr_entry_cache = NULL;
 		}
 	}
 	/*
@@ -1362,7 +1362,7 @@ static int _insert_gpuaddr(struct hgsl_pagetable *pagetable,
 {
 	struct rb_node **node, *parent = NULL;
 	struct hgsl_iommu_addr_entry *new =
-			kmem_cache_alloc(addr_entry_cache, GFP_ATOMIC);
+			HGSL_ZALLOC_CACHED(addr_entry_cache, struct hgsl_iommu_addr_entry, GFP_ATOMIC);
 
 	if (new == NULL)
 		return -ENOMEM;
@@ -1385,7 +1385,7 @@ static int _insert_gpuaddr(struct hgsl_pagetable *pagetable,
 		else {
 			/* Duplicate entry */
 			WARN(1, "duplicate gpuaddr: 0x%llx\n", gpuaddr);
-			kmem_cache_free(addr_entry_cache, new);
+			HGSL_FREE_CACHED(addr_entry_cache, new);
 			return -EEXIST;
 		}
 	}
@@ -1533,7 +1533,7 @@ static int _remove_gpuaddr(struct hgsl_pagetable *pagetable,
 	}
 
 	rb_erase(&entry->node, &pagetable->rbtree);
-	kmem_cache_free(addr_entry_cache, entry);
+	HGSL_FREE_CACHED(addr_entry_cache, entry);
 	return 0;
 }
 

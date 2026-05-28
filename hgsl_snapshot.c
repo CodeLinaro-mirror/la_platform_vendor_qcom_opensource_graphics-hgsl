@@ -34,7 +34,6 @@ void *hgsl_get_va_from_gpuaddr(struct hgsl_priv *priv, uint64_t gpuaddr, uint32_
 	int status = 0;
 	struct hgsl_mem_node *ib_mem_node = NULL;
 
-	mutex_lock(&priv->lock);
 	ib_mem_node = hgsl_mem_find_node_locked(&priv->mem_allocated, gpuaddr, ib_size, false);
 
 	if (!ib_mem_node) {
@@ -55,7 +54,6 @@ void *hgsl_get_va_from_gpuaddr(struct hgsl_priv *priv, uint64_t gpuaddr, uint32_
 		+ (gpuaddr - ib_mem_node->memdesc.gpuaddr));
 out:
 
-	mutex_unlock(&priv->lock);
 	return ret;
 }
 
