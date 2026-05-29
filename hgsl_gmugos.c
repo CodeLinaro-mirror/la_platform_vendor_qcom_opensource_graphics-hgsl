@@ -48,7 +48,6 @@ static void hgsl_snapshot_dump(struct qcom_hgsl *hgsl_dev, uint32_t *msg_buffer,
 	u32 dev_id = hgsl_hnd2id(dev_hnd);
 	struct hgsl_mem_node *mem_node = NULL;
 	uint32_t *snapshot_buffer = NULL;
-	struct iosys_map buf_vmap = { 0 };
 	struct hgsl_snapshot_info_t snapshot_info = {0};
 	uint32_t buf_size = 0;
 	uint32_t used_size = 0;
@@ -93,14 +92,18 @@ static void hgsl_snapshot_dump(struct qcom_hgsl *hgsl_dev, uint32_t *msg_buffer,
 		goto send_msg;
 	}
 
-	dma_buf_begin_cpu_access(mem_node->dma_buf, DMA_BIDIRECTIONAL);
-	ret = dma_buf_vmap_unlocked(mem_node->dma_buf, &buf_vmap);
+	ret = dma_buf_begin_cpu_access(mem_node->dma_buf, DMA_BIDIRECTIONAL);
 	if (ret) {
-		LOGE("failed to map dbq buffer\n");
+		LOGE("failed to begin cpu access\n");
+		goto send_msg;
+	}
+	ret = dma_buf_vmap_unlocked(mem_node->dma_buf, &(mem_node->kva_map));
+	if (ret || !(mem_node->kva_map.vaddr)) {
+		LOGE("failed to map buffer ret=%d vaddr=%x\n", ret, mem_node->kva_map.vaddr);
 		goto send_msg;
 	}
 
-	snapshot_buffer = (uint32_t *)buf_vmap.vaddr;
+	snapshot_buffer = (uint32_t *)mem_node->kva_map.vaddr;
 	for (ib_idx = 0; ib_idx < msg.ib_num; ib_idx++)
 		hgsl_snapshot_parse_ib1(priv, devhandle, msg.gpuaddr[ib_idx],
 			msg.size_dw[ib_idx] * sizeof(uint32_t), &snapshot_info);
@@ -113,11 +116,6 @@ send_msg:
 	hgsl_hyp_export_memory(&priv->hyp_priv,
 		devhandle, mem_node, used_size, buf_size,
 		IB1_SNAPSHOT_BUF, msg_header->msg_packet_seq_no);
-
-	if (buf_vmap.vaddr) {
-		dma_buf_vunmap_unlocked(mem_node->dma_buf, &buf_vmap);
-		dma_buf_end_cpu_access(mem_node->dma_buf, DMA_BIDIRECTIONAL);
-	}
 
 	if (mem_node)
 		hgsl_sharedmem_free(mem_node);
