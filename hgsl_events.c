@@ -52,7 +52,7 @@ static void _hgsl_event_worker(struct kthread_work *work)
 
 	trace_retire_event_cbfunc(event);
 	hgsl_put_context(event->context);
-	kmem_cache_free(events_cache, event);
+	HGSL_FREE_CACHED(events_cache, event);
 }
 
 static void _process_event_group(struct qcom_hgsl *hgsl,
@@ -250,7 +250,7 @@ int hgsl_add_event(struct hgsl_priv *hgsl_priv, struct hgsl_event_group *group,
 		return 0;
 	}
 
-	event = kmem_cache_alloc(events_cache, GFP_KERNEL);
+	event = HGSL_ZALLOC_CACHED(events_cache, struct hgsl_event, GFP_KERNEL);
 	if (!event) {
 		hgsl_put_context(ctxt);
 		return -ENOMEM;
@@ -369,10 +369,10 @@ int hgsl_events_init(struct qcom_hgsl *hgsl)
 	struct kthread_worker *events_worker;
 	int ret = 0;
 
-	events_cache = KMEM_CACHE(hgsl_event, 0);
+	events_cache = KMEM_CACHE(hgsl_event, SLAB_HWCACHE_ALIGN);
 	if (IS_ERR_OR_NULL(events_cache)) {
-		LOGE("Failed to allocate events_cache.\n");
-		return -ENOMEM;
+		LOGW("Failed to allocate events_cache, falling back to kzalloc.\n");
+		events_cache = NULL;
 	}
 
 	/*
@@ -403,7 +403,9 @@ int hgsl_events_init(struct qcom_hgsl *hgsl)
 
 	return 0;
 err:
-	kmem_cache_destroy(events_cache);
-	events_cache = NULL;
+	if (!IS_ERR_OR_NULL(events_cache)) {
+		kmem_cache_destroy(events_cache);
+		events_cache = NULL;
+	}
 	return ret;
 }

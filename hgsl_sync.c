@@ -25,6 +25,24 @@
 static const struct dma_fence_ops hgsl_hsync_fence_ops;
 static const struct dma_fence_ops hgsl_isync_fence_ops;
 
+static struct kmem_cache *hgsl_hsync_fence_cache;
+static struct kmem_cache *hgsl_isync_fence_cache;
+
+void hgsl_sync_cache_init(void)
+{
+	hgsl_hsync_fence_cache = KMEM_CACHE(hgsl_hsync_fence, SLAB_HWCACHE_ALIGN);
+	if (IS_ERR_OR_NULL(hgsl_hsync_fence_cache)) {
+		pr_warn("hgsl: failed to create hgsl_hsync_fence cache, falling back to kzalloc\n");
+		hgsl_hsync_fence_cache = NULL;
+	}
+
+	hgsl_isync_fence_cache = KMEM_CACHE(hgsl_isync_fence, SLAB_HWCACHE_ALIGN);
+	if (IS_ERR_OR_NULL(hgsl_isync_fence_cache)) {
+		pr_warn("hgsl: failed to create hgsl_isync_fence cache, falling back to kzalloc\n");
+		hgsl_isync_fence_cache = NULL;
+	}
+}
+
 static void hgsl_hsync_timeline_signal(
 	struct hgsl_hsync_timeline *timeline, u32 ts);
 
@@ -134,7 +152,7 @@ struct hgsl_hsync_fence *hgsl_hsync_fence_create(
 	if (!timeline || !kref_get_unless_zero(&timeline->kref))
 		return NULL;
 
-	fence = kzalloc(sizeof(*fence), GFP_KERNEL);
+	fence = HGSL_ZALLOC_CACHED(hgsl_hsync_fence_cache, struct hgsl_hsync_fence, GFP_KERNEL);
 	if (fence == NULL) {
 		hgsl_hsync_timeline_put(timeline);
 		return NULL;
@@ -310,7 +328,7 @@ static void hgsl_hsync_fence_release(struct dma_fence *base)
 		hgsl_hsync_timeline_put(timeline);
 	}
 
-	dma_fence_free(base);
+	HGSL_FREE_CACHED(hgsl_hsync_fence_cache, base);
 }
 
 static void hgsl_hsync_fence_value_str(struct dma_fence *base,
@@ -433,7 +451,7 @@ int hgsl_isync_timeline_create(struct hgsl_priv *priv,
 
 	/* allocate IDR failed */
 	if (ret != 0)
-		kfree(timeline);
+		hgsl_isync_timeline_put(timeline);
 	else
 		trace_isync_alloc(idr, initial_ts);
 
@@ -457,7 +475,7 @@ int hgsl_isync_fence_create(struct hgsl_priv *priv, uint32_t timeline_id,
 		goto out;
 	}
 
-	fence = kzalloc(sizeof(*fence), GFP_KERNEL);
+	fence = HGSL_ZALLOC_CACHED(hgsl_isync_fence_cache, struct hgsl_isync_fence, GFP_KERNEL);
 	if (fence == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -744,7 +762,7 @@ struct dma_fence *hgsl_timelines_to_fence_array(struct hgsl_priv *priv,
 			goto err;
 		}
 
-		fence = kzalloc(sizeof(*fence), GFP_KERNEL);
+		fence = HGSL_ZALLOC_CACHED(hgsl_isync_fence_cache, struct hgsl_isync_fence, GFP_KERNEL);
 		if (fence == NULL) {
 			hgsl_isync_timeline_put(timeline);
 			ret = -ENOMEM;
@@ -913,7 +931,7 @@ static void hgsl_isync_fence_release(struct dma_fence *base)
 		hgsl_isync_timeline_put(fence->timeline);
 	}
 
-	dma_fence_free(base);
+	HGSL_FREE_CACHED(hgsl_isync_fence_cache, base);
 }
 
 static void hgsl_isync_fence_value_str(struct dma_fence *base,
@@ -999,7 +1017,7 @@ struct hgsl_sync_fence_cb *hgsl_sync_fence_async_wait(int fd,
 		return ERR_PTR(-EINVAL);
 
 	/* create the callback */
-	kcb = kzalloc(sizeof(*kcb), GFP_KERNEL);
+	kcb = hgsl_zalloc(sizeof(*kcb));
 	if (kcb == NULL) {
 		dma_fence_put(fence);
 		return ERR_PTR(-ENOMEM);
@@ -1014,7 +1032,7 @@ struct hgsl_sync_fence_cb *hgsl_sync_fence_async_wait(int fd,
 				hgsl_sync_fence_callback);
 
 	if (status) {
-		kfree(kcb);
+		hgsl_free(kcb);
 		if (!dma_fence_is_signaled(fence))
 			kcb = ERR_PTR(status);
 		else
@@ -1054,4 +1072,16 @@ struct hgsl_context *hgsl_hsync_fence_get_context(struct dma_fence *fence)
 	hfence = container_of(fence, struct hgsl_hsync_fence, fence);
 	timeline = hfence->timeline;
 	return timeline ? timeline->context : NULL;
+}
+
+void hgsl_sync_cache_destroy(void)
+{
+	if (hgsl_hsync_fence_cache) {
+		kmem_cache_destroy(hgsl_hsync_fence_cache);
+		hgsl_hsync_fence_cache = NULL;
+	}
+	if (hgsl_isync_fence_cache) {
+		kmem_cache_destroy(hgsl_isync_fence_cache);
+		hgsl_isync_fence_cache = NULL;
+	}
 }

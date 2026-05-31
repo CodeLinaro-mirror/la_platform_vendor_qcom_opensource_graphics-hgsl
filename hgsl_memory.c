@@ -19,7 +19,12 @@
 #define pgprot_writethroughcache(_prot)	(_prot)
 #endif
 
-static DEFINE_MUTEX(hgsl_map_global_lock);
+/* MAX_ORDER was renamed to MAX_PAGE_ORDER in kernel 6.3 */
+#ifndef MAX_PAGE_ORDER
+#define MAX_PAGE_ORDER MAX_ORDER
+#endif
+
+static struct kmem_cache *hgsl_mem_node_cache;
 
 static struct sg_table *hgsl_get_sgt_internal(struct hgsl_mem_node *mem_node)
 {
@@ -31,7 +36,7 @@ static struct sg_table *hgsl_get_sgt_internal(struct hgsl_mem_node *mem_node)
 		goto out;
 	}
 
-	mutex_lock(&hgsl_map_global_lock);
+	mutex_lock(&mem_node->sgt_lock);
 	if (!IS_ERR_OR_NULL(mem_node->sgt)) {
 		sgt = mem_node->sgt;
 		mem_node->sgt_refcount++;
@@ -54,7 +59,7 @@ static struct sg_table *hgsl_get_sgt_internal(struct hgsl_mem_node *mem_node)
 			}
 		}
 	}
-	mutex_unlock(&hgsl_map_global_lock);
+	mutex_unlock(&mem_node->sgt_lock);
 
 out:
 	return sgt;
@@ -66,7 +71,7 @@ static void hgsl_put_sgt_internal(struct hgsl_mem_node *mem_node)
 	if (!mem_node)
 		return;
 
-	mutex_lock(&hgsl_map_global_lock);
+	mutex_lock(&mem_node->sgt_lock);
 	if (!mem_node->sgt_refcount || !mem_node->sgt)
 		goto out;
 
@@ -78,7 +83,7 @@ static void hgsl_put_sgt_internal(struct hgsl_mem_node *mem_node)
 			dma_buf_put(mem_node->dma_buf);
 	}
 out:
-	mutex_unlock(&hgsl_map_global_lock);
+	mutex_unlock(&mem_node->sgt_lock);
 }
 
 static struct sg_table *hgsl_mem_map_dma_buf(
@@ -356,7 +361,7 @@ static void hgsl_mem_free_actual(struct hgsl_mem_node *mem_node)
 
 	hgsl_free_pages(mem_node);
 	hgsl_free(mem_node->pages);
-	hgsl_free(mem_node);
+	hgsl_mem_node_free(mem_node);
 }
 
 static void hgsl_mem_dma_buf_release(struct dma_buf *dmabuf)
@@ -374,7 +379,7 @@ static int hgsl_mem_dma_buf_vmap(struct dma_buf *dmabuf, struct iosys_map *map)
 	if (mem_node->flags & GSL_MEMFLAGS_PROTECTED)
 		return -EINVAL;
 
-	mutex_lock(&hgsl_map_global_lock);
+	mutex_lock(&mem_node->sgt_lock);
 	if ((!mem_node->cache_flags.default_iocoherency) ||
 		(mem_node->cache_flags.writecombine_enable))
 		prot = pgprot_writecombine(prot);
@@ -387,7 +392,7 @@ static int hgsl_mem_dma_buf_vmap(struct dma_buf *dmabuf, struct iosys_map *map)
 
 	if (!IS_ERR_OR_NULL(mem_node->vmapping))
 		mem_node->vmap_count++;
-	mutex_unlock(&hgsl_map_global_lock);
+	mutex_unlock(&mem_node->sgt_lock);
 
 	if (!mem_node->vmapping)
 		return -ENOMEM;
@@ -403,7 +408,7 @@ static void hgsl_mem_dma_buf_vunmap(struct dma_buf *dmabuf, struct iosys_map *ma
 	if (mem_node->flags & GSL_MEMFLAGS_PROTECTED)
 		return;
 
-	mutex_lock(&hgsl_map_global_lock);
+	mutex_lock(&mem_node->sgt_lock);
 	if (!mem_node->vmap_count)
 		goto out;
 
@@ -416,7 +421,7 @@ static void hgsl_mem_dma_buf_vunmap(struct dma_buf *dmabuf, struct iosys_map *ma
 		}
 	}
 out:
-	mutex_unlock(&hgsl_map_global_lock);
+	mutex_unlock(&mem_node->sgt_lock);
 }
 
 static struct dma_buf_ops dma_buf_ops = {
@@ -564,6 +569,9 @@ int hgsl_mem_cache_op(struct device *dev, struct hgsl_mem_node *mem_node,
 	if (mem_node->flags & GSL_MEMFLAGS_PROTECTED)
 		return -EINVAL;
 
+	if (mem_node->cache_flags.skip_cache_ops)
+		return 0;
+
 	cache_mode = mem_node->flags & GSL_MEMFLAGS_CACHEMODE_MASK;
 	switch (cache_mode) {
 	case GSL_MEMFLAGS_WRITETHROUGH:
@@ -611,13 +619,17 @@ int hgsl_mem_cache_op(struct device *dev, struct hgsl_mem_node *mem_node,
 	return ret;
 }
 
-static int hgsl_alloc_pages(struct device *dev, uint32_t requested_pcount,
-				struct page **pages)
+static int hgsl_alloc_pages(uint32_t requested_pcount, struct page **pages,
+				unsigned int *hint_order)
 {
 	struct page *page = NULL;
 	unsigned int order = get_order(requested_pcount << PAGE_SHIFT);
 	uint32_t pcount = 0;
 	uint32_t i;
+
+	/* Don't retry orders higher than the last successful one. */
+	if (*hint_order < order)
+		order = *hint_order;
 
 	while (1) {
 		gfp_t gfp_mask = hgsl_gfp_mask(order);
@@ -636,9 +648,9 @@ static int hgsl_alloc_pages(struct device *dev, uint32_t requested_pcount,
 			pcount = requested_pcount;
 		for (i = 0; i < pcount; i++)
 			pages[i] = nth_page(page, i);
-		_dma_cache_op(dev, page, pcount, GSL_CACHEFLAGS_FLUSH);
 		mod_node_page_state(page_pgdat(page), NR_KERNEL_MISC_RECLAIMABLE,
 						(1 << order));
+		*hint_order = order;
 	}
 
 	return pcount;
@@ -671,6 +683,7 @@ int hgsl_sharedmem_alloc(struct device *dev, uint32_t sizebytes,
 	uint32_t requested_pcount = 0;
 	uint32_t allocated_pcount = 0;
 	uint32_t nents = 0;
+	unsigned int hint_order = MAX_PAGE_ORDER;
 	int ret = 0;
 
 	if (!sizebytes || sizebytes > U32_MAX - PAGE_SIZE) {
@@ -695,14 +708,20 @@ int hgsl_sharedmem_alloc(struct device *dev, uint32_t sizebytes,
 	while (requested_pcount > 0) {
 		uint32_t pcount;
 
-		pcount = hgsl_alloc_pages(dev, requested_pcount,
-					mem_node->pages + allocated_pcount);
+		pcount = hgsl_alloc_pages(requested_pcount,
+					mem_node->pages + allocated_pcount,
+					&hint_order);
 
 		if (pcount == 0) {
 			LOGE("Out of memory requested 0x%x, allocated 0x%x",
 				sizebytes, allocated_pcount << PAGE_SHIFT);
 			break;
 		}
+
+		if (!mem_node->cache_flags.skip_cache_ops)
+			_dma_cache_op(dev, mem_node->pages[allocated_pcount],
+					pcount, GSL_CACHEFLAGS_FLUSH);
+
 		allocated_pcount += pcount;
 		requested_pcount -= pcount;
 		nents++;
@@ -734,11 +753,6 @@ void hgsl_sharedmem_free(struct hgsl_mem_node *mem_node)
 	hgsl_put_sgt(mem_node, true);
 
 	if (mem_node->dma_buf) {
-		if (mem_node->kva_map.vaddr) {
-			dma_buf_vunmap_unlocked(mem_node->dma_buf, &mem_node->kva_map);
-			dma_buf_end_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
-		}
-
 		dma_buf_put(mem_node->dma_buf);
 	} else {
 		hgsl_mem_free_actual(mem_node);
@@ -748,16 +762,47 @@ void hgsl_sharedmem_free(struct hgsl_mem_node *mem_node)
 
 void *hgsl_mem_node_zalloc(struct hgsl_cache_flags cache_flags)
 {
-	struct hgsl_mem_node *mem_node = NULL;
+	struct hgsl_mem_node *mem_node =
+		HGSL_ZALLOC_CACHED(hgsl_mem_node_cache, struct hgsl_mem_node, GFP_KERNEL);
 
-	mem_node = hgsl_zalloc(sizeof(*mem_node));
 	if (mem_node == NULL)
 		goto out;
+
 	mem_node->cache_flags.default_iocoherency = cache_flags.default_iocoherency;
 	mem_node->cache_flags.writecombine_enable = cache_flags.writecombine_enable;
+	mem_node->cache_flags.skip_cache_ops = cache_flags.skip_cache_ops;
+
+	mutex_init(&mem_node->sgt_lock);
 
 out:
 	return mem_node;
+}
+
+void hgsl_mem_node_free(struct hgsl_mem_node *mem_node)
+{
+	if (!mem_node)
+		return;
+
+	mutex_destroy(&mem_node->sgt_lock);
+
+	HGSL_FREE_CACHED(hgsl_mem_node_cache, mem_node);
+}
+
+void hgsl_mem_node_cache_init(void)
+{
+	hgsl_mem_node_cache = KMEM_CACHE(hgsl_mem_node, SLAB_HWCACHE_ALIGN);
+	if (IS_ERR_OR_NULL(hgsl_mem_node_cache)) {
+		pr_warn("HGSL: failed to create hgsl_mem_node cache, falling back to kzalloc\n");
+		hgsl_mem_node_cache = NULL;
+	}
+}
+
+void hgsl_mem_node_cache_destroy(void)
+{
+	if (!IS_ERR_OR_NULL(hgsl_mem_node_cache)) {
+		kmem_cache_destroy(hgsl_mem_node_cache);
+		hgsl_mem_node_cache = NULL;
+	}
 }
 
 int hgsl_mem_add_node(struct rb_root *rb_root,

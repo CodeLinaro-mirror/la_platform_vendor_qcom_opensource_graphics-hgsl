@@ -23,6 +23,7 @@
 #include <linux/suspend.h>
 #include <linux/component.h>
 #include <linux/delay.h>
+#include <linux/string.h>
 
 #include "hgsl.h"
 #include "hgsl_tcsr.h"
@@ -73,6 +74,15 @@
 #define DB_SIGNAL_GLOBAL_3  4
 #define DBCQ_SIGNAL_MAX DB_SIGNAL_GLOBAL_3
 #define HGSL_CLEANUP_WAIT_SLICE_IN_MS  50
+
+#define HGSL_CHIP_ID_C314  0x43030E00U
+#define HGSL_CHIP_ID_C523  0x43051700U
+
+static inline bool hgsl_is_iocoherent_gpu(uint32_t chip_id)
+{
+	return chip_id == HGSL_CHIP_ID_C314 ||
+	       chip_id == HGSL_CHIP_ID_C523;
+}
 
 #define QHDR_STATUS_INACTIVE 0x00
 #define QHDR_STATUS_ACTIVE 0x01
@@ -488,13 +498,13 @@ static int db_queue_wait_freewords(struct doorbell_queue *dbq, uint32_t size)
 		return -EINVAL;
 
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		hard_reset_req = hgsl_dbq_get_state_info((uint32_t *)dbq->vbase,
 			HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 			HGSL_DBQ_CONTEXT_ANY,
 			HGSL_DBQ_HOST_TO_GVM_HARDRESET_REQ);
-
-		/* ensure read is done before comparison */
-		dma_rmb();
 
 		if (hard_reset_req == true) {
 			if (db_get_busy_state(dbq->vbase) == true)
@@ -530,6 +540,9 @@ static int dbcq_queue_wait_freewords(struct doorbell_context_queue *dbcq, uint32
 	unsigned int retry_count = 0;
 
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		if (db_context_queue_freedwords(dbcq) >= size)
 			return 0;
 
@@ -545,13 +558,13 @@ static int db_get_busy_state(void *dbq_base)
 {
 	unsigned int busy_state = false;
 
+	/* ensure read the latest value */
+	dma_rmb();
+
 	busy_state = hgsl_dbq_get_state_info((uint32_t *)dbq_base,
 		HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 		HGSL_DBQ_CONTEXT_ANY,
 		HGSL_DBQ_GVM_TO_HOST_HARDRESET_DISPATCH_IN_BUSY);
-
-	/* ensure read is done before comparison */
-	dma_rmb();
 
 	return busy_state;
 }
@@ -639,6 +652,7 @@ quit:
 	/* let user try again incase we miss to submit */
 	if (-ETIMEDOUT == ret) {
 		LOGE("Timed out to send db msg, try again\n");
+		hgsl_debugfs_dump_ctxts(&ctxt, 1, hgsl, false);
 		ret = -EAGAIN;
 	}
 	return ret;
@@ -669,13 +683,13 @@ static int db_send_msg(struct hgsl_priv	 *priv,
 
 	cmds = (struct hgsl_db_cmds *)msg_req->ptr_data;
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		hard_reset_req = hgsl_dbq_get_state_info((uint32_t *)dbq->vbase,
 			HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 			HGSL_DBQ_CONTEXT_ANY,
 			HGSL_DBQ_HOST_TO_GVM_HARDRESET_REQ);
-
-		/* ensure read is done before comparison */
-		dma_rmb();
 
 		if (hard_reset_req) {
 			if (msleep_interruptible(1)) {
@@ -1113,7 +1127,7 @@ static void hgsl_free_per_device_ipc_queues(struct qcom_hgsl *hgsl, uint32_t dev
 	if (!mem_node)
 		return;
 
-	if (mem_node->dma_buf) {
+	if (mem_node->dma_buf && mem_node->kva_map.vaddr) {
 		dma_buf_vunmap_unlocked(mem_node->dma_buf, vmap);
 		dma_buf_end_cpu_access(mem_node->dma_buf, DMA_BIDIRECTIONAL);
 		memset(vmap, 0, sizeof(struct iosys_map));
@@ -1162,7 +1176,7 @@ static int hgsl_init_ipcq_memnode(struct qcom_hgsl *hgsl, int allocate_size,
 
 err:
 	if (node) {
-		if (node->dma_buf) {
+		if (node->dma_buf && node->kva_map.vaddr) {
 			dma_buf_vunmap_unlocked(node->dma_buf,
 				&(hgsl->ipcq_memnode_vmap[dev_idx][q_type]));
 			dma_buf_end_cpu_access(node->dma_buf, DMA_BIDIRECTIONAL);
@@ -1659,9 +1673,9 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 				continue;
 			} else {
 				/*
-					* Device handle returned by BE should be according to
-					* passed device id for other values consider it as error.
-					*/
+				 * Device handle returned by BE should be according to
+				 * passed device id for other values consider it as error.
+				 */
 				if (dev_hnd != rval) {
 					LOGE("Inval dev_handle from BE rval=%d dev_id %d",
 							rval, device_id);
@@ -1685,6 +1699,9 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 			goto out;
 		}
 	}
+
+	/* Fetch chip_id: prefer GSL_HANDLE_DEV0, fall back to GSL_HANDLE_DEV1 */
+	hgsl_hyp_device_getinfo(hgsl, &hgsl->chip_id);
 
 	if (!ret_val)
 		hgsl->global_hyp_inited = true;
@@ -1796,7 +1813,7 @@ static void _cleanup_shadow(struct hgsl_hab_channel_t *hab_channel,
 		hgsl_sharedmem_free(mem_node);
 	} else {
 		hgsl_hyp_put_shadowts_mem(hab_channel, mem_node);
-		kfree(mem_node);
+		hgsl_mem_node_free(mem_node);
 	}
 
 	ctxt->shadow_ts_flags = 0;
@@ -1828,6 +1845,7 @@ static inline void _destroy_context(struct kref *kref)
 	dma_wmb();
 
 	WRITE_ONCE(ctxt->destroyed, true);
+	wake_up_all(&ctxt->destroyed_wq);
 }
 
 struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
@@ -1923,11 +1941,12 @@ static void hgsl_get_shadowts_mem(struct hgsl_hab_channel_t *hab_channel,
 {
 	struct dma_buf *dma_buf = NULL;
 	int ret = 0;
+	struct qcom_hgsl *hgsl = ctxt->priv->dev;
 
 	if (ctxt->shadow_ts_node)
 		return;
 
-	ctxt->shadow_ts_node = hgsl_zalloc(sizeof(*ctxt->shadow_ts_node));
+	ctxt->shadow_ts_node = hgsl_mem_node_zalloc(hgsl->cache_flags);
 	if (ctxt->shadow_ts_node == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -2235,6 +2254,9 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 
 	/* unblock all waiting threads on this context */
 	WRITE_ONCE(ctxt->in_destroy, true);
+	/* fast-retire all pending GPU submissions so _retire_drawobjs can
+	 * drain dispatch->drawobj_list without contacting the hypervisor */
+	ctxt->is_killed = true;
 
 	/* Make sure all pending events are processed or cancelled */
 	hgsl_ctxt_detach_drawobjs(hgsl, ctxt);
@@ -2242,8 +2264,8 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	wake_up_all(&ctxt->wait_q);
 	hgsl_put_context(ctxt);
 
-	while (!READ_ONCE(ctxt->destroyed))
-		cpu_relax();
+	wait_event_killable_timeout(ctxt->destroyed_wq,
+		READ_ONCE(ctxt->destroyed), msecs_to_jiffies(5000));
 
 	mutex_lock(&hgsl->destroying_ctx_list_lock);
 	list_del_init(&ctxt->node);
@@ -2373,6 +2395,7 @@ static int hgsl_ioctl_ctxt_create(
 
 	kref_init(&ctxt->kref);
 	init_waitqueue_head(&ctxt->wait_q);
+	init_waitqueue_head(&ctxt->destroyed_wq);
 	mutex_init(&ctxt->lock);
 
 	rt_mutex_init(&ctxt->drawq_lock);
@@ -2986,7 +3009,7 @@ out:
 		} else
 			hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
 
-		hgsl_free(mem_node);
+		hgsl_mem_node_free(mem_node);
 	}
 
 	hgsl_hyp_channel_pool_put(hab_channel);
@@ -3045,7 +3068,7 @@ static int hgsl_ioctl_mem_unmap_smmu(
 
 			hgsl_trace_gpu_mem_total(priv,
 					-(node_found->memdesc.size64));
-			hgsl_free(node_found);
+			hgsl_mem_node_free(node_found);
 		} else {
 			LOGE("mem_unmap_smmu failed %d", ret);
 
@@ -3968,14 +3991,84 @@ out:
 	return ret;
 }
 
+
+static int hgsl_get_task_name(struct task_struct *task, char *buf, size_t buf_size)
+{
+	struct mm_struct *mm = NULL;
+	char *arg_buf = NULL;
+	char comm[TASK_COMM_LEN] = { 0 };
+	unsigned long arg_start;
+	unsigned long arg_end;
+	unsigned long len;
+	int ret = 0;
+	int size;
+	int retries = 3;
+
+	if (!task || !buf || !buf_size) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	get_task_comm(comm, task);
+	if (strscpy(buf, comm, buf_size) < 0) {
+		ret = -E2BIG;
+		goto out;
+	}
+
+	arg_buf = hgsl_zalloc(HGSL_PROCESS_NAME_MAX_LEN);
+	if (!arg_buf)
+		goto out;
+
+	mm = get_task_mm(task);
+	if (!mm)
+		goto out;
+
+retry:
+	spin_lock(&mm->arg_lock);
+	arg_start = mm->arg_start;
+	arg_end = mm->arg_end;
+	spin_unlock(&mm->arg_lock);
+
+	if (arg_start >= arg_end)
+		goto out;
+
+	len = arg_end - arg_start;
+	if (len >= HGSL_PROCESS_NAME_MAX_LEN)
+		len = HGSL_PROCESS_NAME_MAX_LEN - 1;
+
+	size = access_process_vm(task, arg_start, arg_buf, len, FOLL_FORCE);
+
+	spin_lock(&mm->arg_lock);
+	if (arg_start != mm->arg_start || arg_end != mm->arg_end) {
+		spin_unlock(&mm->arg_lock);
+		if (--retries > 0)
+			goto retry;
+
+		goto out;
+	}
+	spin_unlock(&mm->arg_lock);
+
+	if (size <= 0)
+		goto out;
+
+	arg_buf[size] = '\0';
+	(void)strscpy(buf, kbasename(arg_buf), buf_size);
+
+out:
+	if (mm)
+		mmput(mm);
+	hgsl_free(arg_buf);
+	return ret;
+}
+
 static int hgsl_open(struct inode *inodep, struct file *filep)
 {
 	struct hgsl_priv *priv = NULL;
-	struct qcom_hgsl  *hgsl = container_of(inodep->i_cdev,
-								struct qcom_hgsl, cdev);
+	struct qcom_hgsl *hgsl = container_of(inodep->i_cdev, struct qcom_hgsl, cdev);
 	struct pid *pid = task_tgid(current);
 	struct task_struct *task = pid_task(pid, PIDTYPE_PID);
 	pid_t pid_nr;
+	char task_name[HGSL_PROCESS_NAME_MAX_LEN] = { 0 };
 	int ret = 0;
 
 	if (!task)
@@ -4003,8 +4096,12 @@ static int hgsl_open(struct inode *inodep, struct file *filep)
 	mutex_init(&priv->lock);
 	mutex_init(&priv->sgt_lock);
 
-	ret = hgsl_hyp_init(&priv->hyp_priv, hgsl->dev,
-		priv->pid, task->comm);
+	ret = hgsl_get_task_name(task, task_name, sizeof(task_name));
+	if (ret != 0) {
+		LOGW("Failed to get process name, ret = %d", ret);
+	}
+
+	ret = hgsl_hyp_init(&priv->hyp_priv, hgsl->dev, priv->pid, task_name);
 	if (ret != 0)
 		goto out;
 
@@ -4016,6 +4113,7 @@ static int hgsl_open(struct inode *inodep, struct file *filep)
 	list_add(&priv->node, &hgsl->active_list);
 	hgsl_sysfs_client_init(priv);
 	hgsl_debugfs_client_init(priv);
+
 out:
 	if (ret != 0)
 		kfree(priv);
@@ -4077,7 +4175,7 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 
 		next = rb_next(&node_found->mem_rb_node);
 		rb_erase(&node_found->mem_rb_node, &priv->mem_mapped);
-		hgsl_free(node_found);
+		hgsl_mem_node_free(node_found);
 	}
 
 	next = rb_first(&priv->mem_allocated);
@@ -5307,6 +5405,16 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 	hgsl_dev->cache_flags.writecombine_enable = of_property_read_bool(pdev->dev.of_node,
 							"writecombine_enable");
 
+	/* Skip cache ops when IO coherency is enabled by default */
+	hgsl_dev->cache_flags.skip_cache_ops =
+		hgsl_dev->cache_flags.default_iocoherency &&
+		hgsl_is_iocoherent_gpu(hgsl_dev->chip_id);
+
+	LOGI("chip_id=0x%08x default_iocoherency=%d skip_cache_ops=%d",
+		hgsl_dev->chip_id,
+		hgsl_dev->cache_flags.default_iocoherency,
+		hgsl_dev->cache_flags.skip_cache_ops);
+
 	if (hgsl_dev->fv_on) {
 		for_each_matching_node(node, hgsl_component_match) {
 			if (!of_device_is_available(node)) {
@@ -5457,10 +5565,15 @@ static int __init hgsl_init(void)
 {
 	int err;
 
+	hgsl_mem_node_cache_init();
+	hgsl_sync_cache_init();
+
 	/* Register qcom_hgsl_driver first so that it can get FV status  */
 	err = platform_driver_register(&qcom_hgsl_driver);
 	if (err) {
 		pr_err("Failed to register hgsl driver: %d\n", err);
+		hgsl_sync_cache_destroy();
+		hgsl_mem_node_cache_destroy();
 		goto exit;
 	}
 
@@ -5485,6 +5598,8 @@ static void __exit hgsl_exit(void)
 {
 	hgsl_mmu_exit();
 	platform_driver_unregister(&qcom_hgsl_driver);
+	hgsl_sync_cache_destroy();
+	hgsl_mem_node_cache_destroy();
 #if IS_ENABLED(CONFIG_QCOM_HGSL_TCSR_SIGNAL)
 	platform_driver_unregister(&hgsl_tcsr_driver);
 #endif

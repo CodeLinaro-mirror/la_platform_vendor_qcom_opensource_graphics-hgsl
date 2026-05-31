@@ -4,6 +4,7 @@
  */
 
 #include "hgsl.h"
+#include "hgsl_debugfs.h"
 #include "hgsl_dispatch.h"
 #include "hgsl_trace.h"
 
@@ -65,6 +66,41 @@ static inline void hgsl_dispatch_requeue_drawobj(
 static bool is_cmdobj(struct hgsl_drawobj *drawobj)
 {
 	return (drawobj->type & CMDOBJ_TYPE);
+}
+
+static DEFINE_RATELIMIT_STATE(_dispatch_warn_rs, 5 * HZ, 3);
+
+static const char *drawobj_type_str(u32 type)
+{
+	switch (type) {
+	case CMDOBJ_TYPE:      return "CMD";
+	case MARKEROBJ_TYPE:   return "MARKER";
+	case SYNCOBJ_TYPE:     return "SYNC";
+	case TIMELINEOBJ_TYPE: return "TL";
+	default:               return "?";
+	}
+}
+
+static void _warn_duplicate_ts(struct hgsl_priv *priv,
+				struct hgsl_context *ctxt,
+				struct hgsl_drawobj **drawobj,
+				u32 count, u32 user_ts)
+{
+	u32 k;
+
+	if (!__ratelimit(&_dispatch_warn_rs))
+		return;
+
+	LOGW("ctx:%d ts %u <= queued_ts %u; batch[%u]:",
+	     ctxt->context_id, user_ts, ctxt->queued_ts, count);
+	for (k = 0; k < count; k++) {
+		struct hgsl_drawobj *obj = drawobj[k];
+
+		LOGW("  [%u] %-7s ts=%u numibs=%u", k,
+		     drawobj_type_str(obj->type), obj->timestamp,
+		     (obj->type & CMDOBJ_TYPE) ? CMDOBJ(obj)->numibs : 0);
+	}
+	hgsl_debugfs_dump_ctxts(&ctxt, 1, priv->dev, false);
 }
 
 static bool _check_context_queue(struct hgsl_context *ctxt, u32 count)
@@ -255,13 +291,13 @@ static int _sendcmd(struct qcom_hgsl *hgsl,
 	int ret;
 	struct cmd_obj *obj;
 
-	obj = kmem_cache_alloc(obj_cache, GFP_KERNEL);
+	obj = HGSL_ZALLOC_CACHED(obj_cache, struct cmd_obj, GFP_KERNEL);
 	if (!obj)
 		return -ENOMEM;
 
 	ret = hgsl_issue_drawobj(hgsl, drawobj);
 	if (ret) {
-		kmem_cache_free(obj_cache, obj);
+		HGSL_FREE_CACHED(obj_cache, obj);
 		return ret;
 	}
 
@@ -270,7 +306,7 @@ static int _sendcmd(struct qcom_hgsl *hgsl,
 
 		/* If this MARKER object is already retired, we can destroy it here */
 		if ((test_bit(CMDOBJ_MARKER_EXPIRED, &cmdobj->priv))) {
-			kmem_cache_free(obj_cache, obj);
+			HGSL_FREE_CACHED(obj_cache, obj);
 			hgsl_drawobj_destroy(drawobj);
 			return 0;
 		}
@@ -384,11 +420,11 @@ static int hgsl_dispatch_sendcmds(struct qcom_hgsl *hgsl,
 		/* On error from _sendcmd() try to requeue the cmdobj. */
 		if (ret) {
 			/*
-			 * TODO: -ENOENT which means that the context has been
-			 * destroyed and there will be no more deliveries from
-			 * here, then destroy the cmdobj.
+			 * Destroy if the context is being torn down rather than
+			 * requeue — requeueing during destroy leaks the context
+			 * kref and prevents hgsl_ctxt_destroy from completing.
 			 */
-			if (ret == -ENOENT)
+			if (ret == -ENOENT || READ_ONCE(ctxt->in_destroy))
 				hgsl_drawobj_destroy(drawobj);
 			else {
 				/*
@@ -604,19 +640,38 @@ static void _retire_drawobjs(struct hgsl_context *ctxt)
 
 		hgsl_drawobj_destroy(drawobj);
 		list_del_init(&obj->node);
-		kmem_cache_free(obj_cache, obj);
+		HGSL_FREE_CACHED(obj_cache, obj);
 	}
+}
+
+static void _warn_reclaim_pending(struct hgsl_context *ctxt)
+{
+	struct hgsl_dispatch_context *dispatch = ctxt->dispatch;
+
+	if (!__ratelimit(&_dispatch_warn_rs))
+		return;
+
+	LOGE("ctx:%u [queued_ts=%u processed=%u retired_ts=%u] drawobjs pending",
+	     ctxt->context_id, ctxt->queued_ts,
+	     ctxt->event_group.processed,
+	     get_context_retired_ts(ctxt));
+	hgsl_debugfs_dump_ctxts(&ctxt, 1, dispatch->hgsl, false);
 }
 
 void hgsl_reclaim_drawobjs(struct hgsl_context *ctxt)
 {
 	struct hgsl_dispatch_context *dispatch = ctxt->dispatch;
+	unsigned long deadline = jiffies + msecs_to_jiffies(60000);
 
 	rt_mutex_lock(&dispatch->mutex);
 	while (unlikely(!list_empty(&dispatch->drawobj_list))) {
 		hgsl_process_event_group(dispatch->hgsl, &ctxt->event_group);
 		_retire_drawobjs(ctxt);
 		rt_mutex_unlock(&dispatch->mutex);
+
+		if (time_after(jiffies, deadline))
+			_warn_reclaim_pending(ctxt);
+
 		usleep_range(100, 1000);
 		rt_mutex_lock(&dispatch->mutex);
 	}
@@ -749,8 +804,7 @@ int hgsl_dispatch_queue_cmds(
 		 * issued timestamp in the context
 		 */
 		if (hgsl_ts32_ge(ctxt->queued_ts, user_ts)) {
-			LOGW("ctx:%d next client ts %d isn't greater than current ts %d",
-				ctxt->context_id, user_ts, ctxt->queued_ts);
+			_warn_duplicate_ts(priv, ctxt, drawobj, count, user_ts);
 			ret = -ERANGE;
 			goto out;
 		}
@@ -813,7 +867,7 @@ int hgsl_dispatch_ctxt_init(struct qcom_hgsl *hgsl,
 		goto out;
 	}
 
-	dispatch->worker = kthread_create_worker(0, "hgsl_dispatch_%u_%u",
+	dispatch->worker = kthread_create_worker(0, "hgsl_dp_%u_%u",
 		ctxt->devhandle, ctxt->context_id);
 	if (IS_ERR(dispatch->worker)) {
 		ret = PTR_ERR(dispatch->worker);
@@ -875,30 +929,28 @@ int hgsl_dispatch_init(struct qcom_hgsl *hgsl)
 {
 	int ret;
 
-	obj_cache = KMEM_CACHE(cmd_obj, 0);
+	obj_cache = KMEM_CACHE(cmd_obj, SLAB_HWCACHE_ALIGN);
 	if (IS_ERR_OR_NULL(obj_cache)) {
-		LOGE("Failed to allocate obj_cache.\n");
+		LOGW("Failed to allocate obj_cache, falling back to kzalloc.\n");
 		obj_cache = NULL;
-		return -ENOMEM;
 	}
 
-	ret = hgsl_drawobjs_init();
-	if (ret) {
-		LOGE("drawobjs init failed, ret %d\n", ret);
-		goto err;
-	}
+	/* best-effort: cache creation failures fall back to kzalloc */
+	hgsl_drawobjs_init();
 
 	/* Set up the GPU events for the device */
 	ret = hgsl_events_init(hgsl);
 	if (ret) {
 		LOGE("events init failed, ret %d\n", ret);
-		hgsl_drawobjs_deinit();
 		goto err;
 	}
 
 	return 0;
 err:
-	kmem_cache_destroy(obj_cache);
-	obj_cache = NULL;
+	hgsl_drawobjs_deinit();
+	if (!IS_ERR_OR_NULL(obj_cache)) {
+		kmem_cache_destroy(obj_cache);
+		obj_cache = NULL;
+	}
 	return ret;
 }

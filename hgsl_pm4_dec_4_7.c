@@ -168,7 +168,7 @@ enum hgsl_add_buffer_state_t hgsl_pm4_add_buffer(struct hgsl_pm4_buffers_t *bufs
 			if (desc != NULL)
 				*desc = pdesc;
 			else
-				LOGE("Input pointer desc is NULL");
+				LOGI("Input pointer desc is NULL");
 
 			bufs->num_buffers++;
 			error_printed = GSL_FALSE;
@@ -190,7 +190,7 @@ void *hgsl_pm4_get_buff_ptr(struct hgsl_pm4_bufdesc_t *buf)
 {
 	void *ptr = buf->copy_ptr;
 
-	if (!buf->memdesc.size)
+	if (!buf->memdesc.size || !buf->memdesc.hostptr)
 		return NULL;
 
 	if (!ptr) {

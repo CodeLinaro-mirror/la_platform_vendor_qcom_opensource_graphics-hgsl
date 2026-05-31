@@ -60,6 +60,8 @@
 #define HGSL_IPCQ_RGS_IDX (0)
 #define HGSL_IPCQ_GMU_IDX (1)
 
+#define HGSL_PROCESS_NAME_MAX_LEN (128)
+
 #define USRPTR(a) u64_to_user_ptr((uint64_t)(a))
 
 #define HGSL_MAX_IOC_SIZE (128)
@@ -283,6 +285,7 @@ struct qcom_hgsl {
 	spinlock_t isync_timeline_lock;
 	atomic64_t total_mem_size;
 	struct hgsl_cache_flags cache_flags;
+	uint32_t chip_id;
 
 	struct hgsl_init_param_t ipcq_settings[HGSL_DEVICE_NUM];
 	struct hgsl_gvm_settings gvm_settings[HGSL_DEVICE_NUM];
@@ -342,6 +345,7 @@ struct hgsl_context {
 	bool is_fe_shadow;
 	bool in_destroy;
 	bool destroyed;
+	wait_queue_head_t destroyed_wq;
 	struct kref kref;
 
 	uint32_t last_ts;
@@ -500,11 +504,9 @@ out:
 
 static inline uint32_t get_context_retired_ts(struct hgsl_context *ctxt)
 {
-	u32 ts = ctxt->shadow_ts->eop;
-
-	/* ensure read is done before comparison */
+	/* ensure read the latest value */
 	dma_rmb();
-	return ts;
+	return ctxt->shadow_ts->eop;
 }
 
 static inline int get_context_shadow_ts(
@@ -518,6 +520,9 @@ static inline int get_context_shadow_ts(
 		*timestamp = 0;
 		return -EINVAL;
 	}
+
+	/* ensure read the latest value */
+	dma_rmb();
 
 	switch (type) {
 	case GSL_TIMESTAMP_RETIRED:
@@ -535,8 +540,6 @@ static inline int get_context_shadow_ts(
 		break;
 	}
 
-	/* ensure read is done before return */
-	dma_rmb();
 	LOGD("%d, %u, %u, %u", ret, ctxt->context_id, type, *timestamp);
 	return ret;
 }
@@ -687,6 +690,9 @@ struct hgsl_isync_timeline *hgsl_isync_timeline_get(struct hgsl_priv *priv,
 		int id, bool check_owner);
 
 void hgsl_isync_timeline_put(struct hgsl_isync_timeline *timeline);
+
+void hgsl_sync_cache_init(void);
+void hgsl_sync_cache_destroy(void);
 
 int hgsl_isync_query(struct hgsl_priv *priv, uint32_t timeline_id,
 							uint64_t *ts);
