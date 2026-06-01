@@ -5153,7 +5153,6 @@ static int hgsl_suspend(struct device *dev)
 	if (hgsl->lockless_wq)
 		flush_workqueue(hgsl->lockless_wq);
 
-	// TODO: shall we disable the interrupt from GMU? and enable them after resume?
 	return 0;
 }
 
@@ -5185,16 +5184,26 @@ static int hgsl_resume(struct device *dev)
 	mutex_unlock(&hgsl->mutex);
 
 	/*
-		* There could be a scenario when GVM submit some work to GMU
-		* just before going to suspend, in this case, the GMU will
-		* not submit it to RB and when GMU resume(FW reload) happens,
-		* it submits the work to GPU and fire the ts_retire to GVM.
-		* At this point, the GVM is not up so it may miss the
-		* interrupt from GMU so check if there is any ts_retire by
-		* reading the shadow timestamp.
-		*/
+	 * Catch up any timestamp retirements that occurred during suspend.
+	 *
+	 * Two paths need separate handling because they use different
+	 * notification mechanisms at runtime:
+	 *
+	 * TCSR path: hgsl_tcsr_isr → queue_work(ts_retire_work) → hgsl_retire_common
+	 *   Covered by the queue_work() call below.
+	 *
+	 * GMUGOS path: hgsl_gmugos_ts_retire (threaded IRQ) → hgsl_retire_common
+	 *   NOT covered by ts_retire_work.  Must call hgsl_retire_common()
+	 *   directly for each active GMUGOS device, mirroring what the
+	 *   threaded IRQ handler would have done.
+	 */
 	if (hgsl->wq != NULL)
 		queue_work(hgsl->wq, &hgsl->ts_retire_work);
+
+	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
+		if (hgsl->gmugos[i].dev_hnd)
+			hgsl_retire_common(hgsl, hgsl->gmugos[i].dev_hnd);
+	}
 
 	if(true == of_property_read_bool(pdev->dev.of_node, "notify-resume")) {
 
