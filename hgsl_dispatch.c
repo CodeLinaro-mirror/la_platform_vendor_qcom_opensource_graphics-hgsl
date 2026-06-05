@@ -233,6 +233,8 @@ static void _retire_timestamp_only(struct hgsl_drawobj *drawobj)
 
 	/* Retire pending GPU events for the object */
 	hgsl_process_event_group(hgsl, &ctxt->event_group);
+
+	wake_up_all(&ctxt->wait_q);
 }
 
 static void _retire_timestamp(struct hgsl_drawobj *drawobj)
