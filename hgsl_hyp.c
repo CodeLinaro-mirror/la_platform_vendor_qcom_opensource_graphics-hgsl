@@ -3591,7 +3591,7 @@ out:
 		}
 
 		if (ctxt->is_fe_shadow) {
-			hgsl_hyp_mem_unmap_smmu(hab_channel, shadow_mem_node);
+
 			hgsl_sharedmem_free(shadow_mem_node);
 			ctxt->shadow_ts_node = NULL;
 		} else if (shadow_mem_node)
