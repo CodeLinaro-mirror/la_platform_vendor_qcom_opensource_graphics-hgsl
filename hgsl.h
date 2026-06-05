@@ -343,6 +343,7 @@ struct hgsl_context {
 	bool is_fe_shadow;
 	bool in_destroy;
 	bool destroyed;
+	wait_queue_head_t destroyed_wq;
 	struct kref kref;
 
 	uint32_t last_ts;
