@@ -1623,6 +1623,8 @@ static void _signal_contexts(struct qcom_hgsl *hgsl,
 		if (!ctxt)
 			continue;
 		hgsl_process_event_group(hgsl, &ctxt->event_group);
+		if (READ_ONCE(ctxt->queued))
+			hgsl_dispatch_queue_context(ctxt);
 		hgsl_put_context(ctxt);
 	}
 }

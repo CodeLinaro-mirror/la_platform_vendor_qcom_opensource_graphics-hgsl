@@ -318,6 +318,10 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 
 		list[count++] = drawobj;
 	}
+	/* The loop above advances drawq_head without calling _pop_drawobj,
+	 * so ctxt->queued is not decremented.  Reset it here.
+	 */
+	ctxt->queued = 0;
 	rt_mutex_unlock(&ctxt->drawq_lock);
 
 	for (i = 0; i < count; i++) {
