@@ -1800,7 +1800,7 @@ err:
 }
 
 static void _cleanup_shadow(struct hgsl_hab_channel_t *hab_channel,
-				struct hgsl_context *ctxt)
+				struct hgsl_context *ctxt, bool skip_hab)
 {
 	struct hgsl_mem_node *mem_node = ctxt->shadow_ts_node;
 
@@ -1823,10 +1823,12 @@ static void _cleanup_shadow(struct hgsl_hab_channel_t *hab_channel,
 		 * so now request to unmap the buffer after sending RPC call
 		 * to destroy the context.
 		 */
-		hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
+		if (!skip_hab)
+			hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
 		hgsl_sharedmem_free(mem_node);
 	} else {
-		hgsl_hyp_put_shadowts_mem(hab_channel, mem_node);
+		if (!skip_hab)
+			hgsl_hyp_put_shadowts_mem(hab_channel, mem_node);
 		hgsl_mem_node_free(mem_node);
 	}
 
@@ -1985,7 +1987,7 @@ static void hgsl_get_shadowts_mem(struct hgsl_hab_channel_t *hab_channel,
 
 out:
 	if (ret)
-		_cleanup_shadow(hab_channel, ctxt);
+		_cleanup_shadow(hab_channel, ctxt, false);
 }
 
 static int hgsl_ioctl_get_shadowts_mem(
@@ -2234,6 +2236,7 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	struct hgsl_context *ctxt = NULL;
 	int ret;
 	bool put_channel = false;
+	bool skip_hab = false;
 	struct doorbell_queue *dbq = NULL;
 	struct hgsl_pagetable *pt = NULL;
 
@@ -2300,7 +2303,7 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	}
 
 	if (!ctxt->is_fe_shadow)
-		_cleanup_shadow(hab_channel, ctxt);
+		_cleanup_shadow(hab_channel, ctxt, false);
 
 	ret = hgsl_hyp_ctxt_destroy(hab_channel,
 			ctxt->devhandle, ctxt->context_id, rval, ctxt->dbcq_export_id);
@@ -2316,11 +2319,18 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 		ctxt->ctxt_record_mem_node = NULL;
 	}
 
-	hgsl_dbcq_close(ctxt);
+	/*
+	 * PVM already exited (habmm_unexport EBUSY, ret != 0) on the workqueue
+	 * path (can_retry=false) — skip HAB RPCs but still free GVM-side
+	 * dma_buf and mem_node to avoid leaks.
+	 */
+	if (ret == -EBUSY && !can_retry)
+		skip_hab = true;
 
 	if (ctxt->is_fe_shadow)
-		_cleanup_shadow(hab_channel, ctxt);
+		_cleanup_shadow(hab_channel, ctxt, skip_hab);
 
+	hgsl_dbcq_close(ctxt);
 	hgsl_free(ctxt);
 out:
 	if (put_channel)
@@ -2458,13 +2468,13 @@ out:
 			/* Remove the event group from the list */
 			hgsl_del_event_group(hgsl, &ctxt->event_group);
 			if (!ctxt->is_fe_shadow)
-				_cleanup_shadow(hab_channel, ctxt);
+				_cleanup_shadow(hab_channel, ctxt, false);
 			hgsl_hyp_ctxt_destroy(hab_channel, ctxt->devhandle,
 						ctxt->context_id, NULL,
 						ctxt->dbcq_export_id);
 			hgsl_dbcq_close(ctxt);
 			if (ctxt->is_fe_shadow)
-				_cleanup_shadow(hab_channel, ctxt);
+				_cleanup_shadow(hab_channel, ctxt, false);
 
 			kfree(ctxt->timeline);
 		}
