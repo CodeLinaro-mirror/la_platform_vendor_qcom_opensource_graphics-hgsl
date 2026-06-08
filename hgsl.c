@@ -2300,6 +2300,8 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 			goto out;
 		}
 		put_channel = true;
+		/* workqueue path — PVM may exit before we finish; use short timeout */
+		hab_channel->teardown = true;
 	}
 
 	if (!ctxt->is_fe_shadow)
@@ -4168,6 +4170,7 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 		LOGE("Failed to get channel %d", ret);
 		goto out;
 	}
+	hab_channel->teardown = true;
 
 	ret = hgsl_hyp_notify_cleanup(hab_channel, HGSL_CLEANUP_WAIT_SLICE_IN_MS);
 	if (ret == -ETIMEDOUT)

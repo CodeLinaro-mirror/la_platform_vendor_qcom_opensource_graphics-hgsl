@@ -182,8 +182,15 @@ static int gsl_rpc_send_(const char *fname, int line_num, void *data,
 static int gsl_rpc_recv_(const char *fname, int line_num, void *data,
 	size_t size, struct hgsl_hab_channel_t *hab_channel, int interruptible)
 {
-	int ret = gsl_hab_recv(hab_channel->socket,
-		(unsigned char *)data, size, interruptible);
+	int ret;
+
+	if (hab_channel->teardown)
+		ret = gsl_hab_recv_timeout(hab_channel->socket,
+			(unsigned char *)data, size, interruptible,
+			HGSL_HAB_RECV_TIMEOUT_MS);
+	else
+		ret = gsl_hab_recv(hab_channel->socket,
+			(unsigned char *)data, size, interruptible);
 
 	return ret;
 }
@@ -607,6 +614,7 @@ void hgsl_hyp_channel_pool_put_unsafe(struct hgsl_hab_channel_t *hab_channel)
 		if (hab_channel->wait_retry)
 			LOGE("put channel waiting for retry");
 		hab_channel->busy = false;
+		hab_channel->teardown = false;
 		list_del(&hab_channel->node);
 		list_add_tail(&hab_channel->node, &priv->free_channels);
 		LOGD("put %p back to free pool", hab_channel);
