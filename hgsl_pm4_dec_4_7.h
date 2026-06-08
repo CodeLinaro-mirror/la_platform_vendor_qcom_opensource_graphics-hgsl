@@ -7,7 +7,7 @@
 #define __HGSL_PM4_DEC_4_7_H_
 
 #define HGSL_PM4_MAX_BUFFERS_TRACKED 4096
-#define HGSL_PM4_MAX_PARSE_DEPTH     5
+#define HGSL_PM4_MAX_PARSE_DEPTH     10
 
 /* Draw via indirect data */
 #define CP_DRAW_INDIRECT            0x28
@@ -53,7 +53,7 @@ static const uint32_t Pm4Type4HeaderCountShift;
 #define HGSL_PM4_DEC_MAX_VBOS                                (32)
 #define HGSL_PM4_DEC_MAX_VSTREAMS                            (16)
 
-#define HGSL_PM4_MAX_PARSE_DEPTH                 5
+#define HGSL_PM4_MAX_PARSE_DEPTH                 10
 
 enum HLSQ_STATESRC_ENUM {
 	HLSQ_DIRECT                              = 0x0,
