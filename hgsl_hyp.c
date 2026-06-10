@@ -3513,7 +3513,8 @@ int hgsl_hyp_ctxt_create_v2(struct device *dev,
 		mutex_lock(&priv->lock);
 		ret = hgsl_mem_add_node(&priv->mem_allocated, ctxt_record_mem_node);
 		if (likely(!ret)) {
-			hgsl_trace_gpu_mem_total(priv, ctxt_record_mem_node->memdesc.size64);
+			hgsl_trace_gpu_mem_total(priv, ctxt_record_mem_node->memdesc.size64,
+					 ctxt_record_mem_node->flags, false);
 			ctxt_node_added = true;
 		}
 		mutex_unlock(&priv->lock);
@@ -3602,7 +3603,8 @@ out:
 				mutex_lock(&priv->lock);
 				rb_erase(&ctxt_record_mem_node->mem_rb_node, &priv->mem_allocated);
 				hgsl_trace_gpu_mem_total(priv,
-										-(ctxt_record_mem_node->memdesc.size64));
+						-(ctxt_record_mem_node->memdesc.size64),
+						ctxt_record_mem_node->flags, false);
 				mutex_unlock(&priv->lock);
 			}
 

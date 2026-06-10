@@ -283,7 +283,10 @@ struct qcom_hgsl {
 	struct work_struct release_work;
 	struct idr isync_timeline_idr;
 	spinlock_t isync_timeline_lock;
-	atomic64_t total_mem_size;
+	atomic64_t total_mem_size;  /* trace-only: updated atomically via atomic64_add_return */
+	atomic64_t alloc_mem_size;  /* hgsl-owned allocations (includes protected) */
+	atomic64_t extern_mem_size; /* externally imported/mapped (includes protected) */
+	atomic64_t prot_mem_size;   /* protected subset of alloc+extern */
 	struct hgsl_cache_flags cache_flags;
 	uint32_t chip_id;
 
@@ -308,8 +311,6 @@ struct qcom_hgsl {
 	struct kobject sysfs;
 	struct kobject *clients_sysfs;
 	struct dentry *debugfs;
-	struct dentry *clients_debugfs;
-	struct dentry *debugfs_stat;
 	struct mutex destroying_ctx_list_lock;
 	struct list_head destroying_ctx_list;
 
@@ -385,17 +386,15 @@ struct hgsl_priv {
 	struct rb_root mem_allocated;
 	int open_count;
 
-	atomic64_t total_mem_size;
+	atomic64_t total_mem_size;  /* trace-only: updated atomically via atomic64_add_return */
+	atomic64_t alloc_mem_size;  /* hgsl-owned allocations (includes protected) */
+	atomic64_t extern_mem_size; /* externally imported/mapped (includes protected) */
+	atomic64_t prot_mem_size;   /* protected subset of alloc+extern */
 
 	/* sysfs stuff */
 	struct kobject kobj;
 	struct kobject sysfs_client;
 	struct kobject sysfs_mem_size;
-	struct dentry *debugfs_client;
-	struct dentry *debugfs_mem;
-	struct dentry *debugfs_memtype;
-	struct dentry *debugfs_mem_mapped;
-	struct dentry *debugfs_mem_mapped_type;
 	/* pointer to pagetable that the object is mapped in */
 	struct hgsl_pagetable *pagetable[HGSL_DEVICE_NUM];
 	struct mutex sgt_lock;
@@ -788,6 +787,7 @@ struct hgsl_sync_fence_cb *hgsl_sync_fence_async_wait(int fd, bool (*func)(void 
 		void *priv);
 void hgsl_sync_fence_async_cancel(struct hgsl_sync_fence_cb *kcb);
 
-void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta);
+void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta,
+			      uint32_t flags, bool is_mapped);
 bool get_fv_status(struct qcom_hgsl *hgsl, u32 dev_id);
 #endif /* __HGSL_H_ */
