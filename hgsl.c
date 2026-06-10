@@ -361,17 +361,32 @@ struct db_ignore_retpacket {
 } __packed;
 
 #ifdef CONFIG_TRACE_GPU_MEM
-void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta)
+void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta,
+			      uint32_t flags, bool is_mapped)
 {
 	struct qcom_hgsl *hgsl = priv->dev;
-	uint64_t size = atomic64_add_return(delta, &priv->total_mem_size);
-	uint64_t global_size = atomic64_add_return(delta, &hgsl->total_mem_size);
 
-	trace_gpu_mem_total(0, priv->pid, size);
-	trace_gpu_mem_total(0, 0, global_size);
+	trace_gpu_mem_total(0, priv->pid,
+			    (uint64_t)atomic64_add_return(delta, &priv->total_mem_size));
+	trace_gpu_mem_total(0, 0,
+			    (uint64_t)atomic64_add_return(delta, &hgsl->total_mem_size));
+
+	if (is_mapped) {
+		atomic64_add(delta, &priv->extern_mem_size);
+		atomic64_add(delta, &hgsl->extern_mem_size);
+	} else {
+		atomic64_add(delta, &priv->alloc_mem_size);
+		atomic64_add(delta, &hgsl->alloc_mem_size);
+	}
+
+	if (flags & GSL_MEMFLAGS_PROTECTED) {
+		atomic64_add(delta, &priv->prot_mem_size);
+		atomic64_add(delta, &hgsl->prot_mem_size);
+	}
 }
 #else
-static inline void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta)
+static inline void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta,
+					    uint32_t flags, bool is_mapped)
 {
 }
 #endif
@@ -2308,7 +2323,9 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 		mutex_lock(&priv->lock);
 		rb_erase(&ctxt->ctxt_record_mem_node->mem_rb_node, &priv->mem_allocated);
 		mutex_unlock(&priv->lock);
-		hgsl_trace_gpu_mem_total(priv, -(ctxt->ctxt_record_mem_node->memdesc.size64));
+		hgsl_trace_gpu_mem_total(priv,
+				-(ctxt->ctxt_record_mem_node->memdesc.size64),
+				ctxt->ctxt_record_mem_node->flags, false);
 		pt = hgsl_get_ctxt_pagetable(priv);
 		(void)hgsl_mmu_put_gpuaddr(pt, ctxt->ctxt_record_mem_node, hgsl->use_single_pt);
 		(void)hgsl_mmu_unmap(hgsl, pt, ctxt->ctxt_record_mem_node, true, dev_hnd);
@@ -2763,7 +2780,8 @@ static int hgsl_ioctl_mem_alloc(
 	else {
 		params->fd = mem_fd;
 		fd_install(params->fd, mem_node->dma_buf->file);
-		hgsl_trace_gpu_mem_total(priv, mem_node->memdesc.size64);
+		hgsl_trace_gpu_mem_total(priv, mem_node->memdesc.size64,
+					 mem_node->flags, false);
 	}
 	mutex_unlock(&priv->lock);
 
@@ -2852,7 +2870,8 @@ static int hgsl_ioctl_mem_free(
 			if (use_fv)
 				hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
 
-			hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
+			hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64),
+						 node_found->flags, false);
 			hgsl_sharedmem_free(node_found);
 		} else {
 			LOGE("hgsl_hyp_mem_unmap_smmu failed %d", ret);
@@ -3013,7 +3032,8 @@ static int hgsl_ioctl_mem_map_smmu(
 	mutex_lock(&priv->lock);
 	ret = hgsl_mem_add_node(&priv->mem_mapped, mem_node);
 	if (likely(!ret))
-		hgsl_trace_gpu_mem_total(priv, mem_node->memdesc.size64);
+		hgsl_trace_gpu_mem_total(priv, mem_node->memdesc.size64,
+					 mem_node->flags, true);
 	mutex_unlock(&priv->lock);
 
 out:
@@ -3083,11 +3103,11 @@ static int hgsl_ioctl_mem_unmap_smmu(
 				hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
 
 			hgsl_trace_gpu_mem_total(priv,
-					-(node_found->memdesc.size64));
+					-(node_found->memdesc.size64),
+					node_found->flags, true);
 			hgsl_mem_node_free(node_found);
 		} else {
 			LOGE("mem_unmap_smmu failed %d", ret);
-
 			mutex_lock(&priv->lock);
 			ret = hgsl_mem_add_node(&priv->mem_mapped, node_found);
 			mutex_unlock(&priv->lock);
@@ -4128,7 +4148,6 @@ static int hgsl_open(struct inode *inodep, struct file *filep)
 
 	list_add(&priv->node, &hgsl->active_list);
 	hgsl_sysfs_client_init(priv);
-	hgsl_debugfs_client_init(priv);
 
 out:
 	if (ret != 0)
@@ -4187,7 +4206,8 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
 			hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)
 			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
-		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
+		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64),
+					 node_found->flags, true);
 
 		next = rb_next(&node_found->mem_rb_node);
 		rb_erase(&node_found->mem_rb_node, &priv->mem_mapped);
@@ -4214,7 +4234,8 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
 			(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
 			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
-		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
+		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64),
+					 node_found->flags, false);
 
 		next = rb_next(&node_found->mem_rb_node);
 		rb_erase(&node_found->mem_rb_node, &priv->mem_allocated);
@@ -4323,7 +4344,6 @@ static int hgsl_release(struct inode *inodep, struct file *filep)
 		WARN_ON(1);
 	else if (--priv->open_count == 0) {
 		list_move(&priv->node, &hgsl->release_list);
-		hgsl_debugfs_client_release(priv);
 		hgsl_sysfs_client_release(priv);
 		queue_work(hgsl->release_wq, &hgsl->release_work);
 	}
