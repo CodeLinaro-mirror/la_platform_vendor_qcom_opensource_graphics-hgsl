@@ -14,9 +14,12 @@
 
 #define HAB_INVALID_HANDLE ((int)-1)
 #define HGSL_MAX_DUMP_PAYLOAD_SIZE (32)
+#define HGSL_HAB_RECV_TIMEOUT_MS   2000
 
 int gsl_hab_open(int *habfd);
 int gsl_hab_recv(int habfd, unsigned char *p, size_t sz, int interruptible);
+int gsl_hab_recv_timeout(int habfd, unsigned char *p, size_t sz,
+			 int interruptible, uint32_t timeout_ms);
 int gsl_hab_send(int habfd, unsigned char *p, size_t sz);
 int gsl_hab_close(int habfd);
 
