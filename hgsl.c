@@ -1859,6 +1859,7 @@ static inline void _destroy_context(struct kref *kref)
 	dma_wmb();
 
 	WRITE_ONCE(ctxt->destroyed, true);
+	wake_up_all(&ctxt->destroyed_wq);
 }
 
 struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
@@ -2269,6 +2270,9 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 
 	/* unblock all waiting threads on this context */
 	WRITE_ONCE(ctxt->in_destroy, true);
+	/* fast-retire all pending GPU submissions so _retire_drawobjs can
+	 * drain dispatch->drawobj_list without contacting the hypervisor */
+	ctxt->is_killed = true;
 
 	/* Make sure all pending events are processed or cancelled */
 	hgsl_ctxt_detach_drawobjs(hgsl, ctxt);
@@ -2276,8 +2280,8 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	wake_up_all(&ctxt->wait_q);
 	hgsl_put_context(ctxt);
 
-	while (!READ_ONCE(ctxt->destroyed))
-		cpu_relax();
+	wait_event_killable_timeout(ctxt->destroyed_wq,
+		READ_ONCE(ctxt->destroyed), msecs_to_jiffies(5000));
 
 	mutex_lock(&hgsl->destroying_ctx_list_lock);
 	list_del_init(&ctxt->node);
@@ -2407,6 +2411,7 @@ static int hgsl_ioctl_ctxt_create(
 
 	kref_init(&ctxt->kref);
 	init_waitqueue_head(&ctxt->wait_q);
+	init_waitqueue_head(&ctxt->destroyed_wq);
 	mutex_init(&ctxt->lock);
 
 	rt_mutex_init(&ctxt->drawq_lock);

@@ -384,11 +384,11 @@ static int hgsl_dispatch_sendcmds(struct qcom_hgsl *hgsl,
 		/* On error from _sendcmd() try to requeue the cmdobj. */
 		if (ret) {
 			/*
-			 * TODO: -ENOENT which means that the context has been
-			 * destroyed and there will be no more deliveries from
-			 * here, then destroy the cmdobj.
+			 * Destroy if the context is being torn down rather than
+			 * requeue — requeueing during destroy leaks the context
+			 * kref and prevents hgsl_ctxt_destroy from completing.
 			 */
-			if (ret == -ENOENT)
+			if (ret == -ENOENT || READ_ONCE(ctxt->in_destroy))
 				hgsl_drawobj_destroy(drawobj);
 			else {
 				/*
