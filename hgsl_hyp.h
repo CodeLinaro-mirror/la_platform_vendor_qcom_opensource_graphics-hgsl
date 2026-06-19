@@ -669,6 +669,7 @@ struct hgsl_hab_channel_t {
 	int id;
 	bool wait_retry;
 	bool busy;
+	bool teardown;	/* set during process exit cleanup — use short HAB recv timeout */
 	struct hgsl_hyp_priv_t *priv;
 	struct gsl_hab_payload send_buf;
 	struct gsl_hab_payload recv_buf;
