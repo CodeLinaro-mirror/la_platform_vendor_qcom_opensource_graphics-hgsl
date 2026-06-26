@@ -42,7 +42,12 @@ void *hgsl_get_va_from_gpuaddr(struct hgsl_priv *priv, uint64_t gpuaddr, uint32_
 	}
 
 	if (!ib_mem_node->kva_map.vaddr) {
-		dma_buf_begin_cpu_access(ib_mem_node->dma_buf, DMA_FROM_DEVICE);
+		status = dma_buf_begin_cpu_access(ib_mem_node->dma_buf, DMA_FROM_DEVICE);
+		if (status) {
+			LOGE("failed to begin ib memnode access\n");
+			goto out;
+		}
+
 		status = dma_buf_vmap_unlocked(ib_mem_node->dma_buf, &(ib_mem_node->kva_map));
 		if (status) {
 			LOGE("failed to map ib memnode buffer\n");
@@ -240,6 +245,5 @@ void hgsl_snapshot_flush_memory(struct hgsl_snapshot_info_t *snapshot,
 
 		snapshot->gpu_objs_head = NULL;
 		*used_size = HGSL_SNAPSHOT_BUFFER_SIZE_IN_BYTES - unused_size;
-		LOGD("snapshto used size 0x%x", *used_size);
 	}
 }

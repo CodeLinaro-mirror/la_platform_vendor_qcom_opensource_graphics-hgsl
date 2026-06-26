@@ -182,8 +182,15 @@ static int gsl_rpc_send_(const char *fname, int line_num, void *data,
 static int gsl_rpc_recv_(const char *fname, int line_num, void *data,
 	size_t size, struct hgsl_hab_channel_t *hab_channel, int interruptible)
 {
-	int ret = gsl_hab_recv(hab_channel->socket,
-		(unsigned char *)data, size, interruptible);
+	int ret;
+
+	if (hab_channel->teardown)
+		ret = gsl_hab_recv_timeout(hab_channel->socket,
+			(unsigned char *)data, size, interruptible,
+			HGSL_HAB_RECV_TIMEOUT_MS);
+	else
+		ret = gsl_hab_recv(hab_channel->socket,
+			(unsigned char *)data, size, interruptible);
 
 	return ret;
 }
@@ -607,6 +614,7 @@ void hgsl_hyp_channel_pool_put_unsafe(struct hgsl_hab_channel_t *hab_channel)
 		if (hab_channel->wait_retry)
 			LOGE("put channel waiting for retry");
 		hab_channel->busy = false;
+		hab_channel->teardown = false;
 		list_del(&hab_channel->node);
 		list_add_tail(&hab_channel->node, &priv->free_channels);
 		LOGD("put %p back to free pool", hab_channel);
@@ -3169,7 +3177,9 @@ static int assign_shadow_ts_cpu_addr_memstore(struct hgsl_context *ctxt,
 		goto out;
 	}
 
-	dma_buf_begin_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
+	ret = dma_buf_begin_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
+	if (ret)
+		goto out;
 	ret = dma_buf_vmap_unlocked(mem_node->dma_buf, &ctxt->map);
 	if (ret) {
 		dma_buf_end_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
@@ -3257,17 +3267,22 @@ static int read_shadowts_mem_be(struct hgsl_hab_channel_t *hab_channel,
 			PAGE_ALIGN(rpc_shadow.sizebytes), export_id, 0);
 		if (ret) {
 			LOGE("habmm_import failed, ret = %d", ret);
+			hgsl_hyp_put_shadowts_mem(hab_channel, mem_node);
 			goto out;
 		}
 
 		mem_node->export_id = export_id;
-		dma_buf_begin_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
+		ret = dma_buf_begin_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
+		if (ret) {
+			LOGE("failed to cpu access shadowts_mem");
+			hgsl_hyp_put_shadowts_mem(hab_channel, mem_node);
+			goto out;
+		}
+
 		ret = dma_buf_vmap_unlocked(mem_node->dma_buf, &ctxt->map);
 		if (ret) {
 			dma_buf_end_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
 			hgsl_hyp_put_shadowts_mem(hab_channel, mem_node);
-			habmm_unimport(hab_channel->socket,
-					export_id, mem_node->dma_buf, 0);
 			ret = -EFAULT;
 		} else {
 			ctxt->shadow_ts = (struct shadow_ts *)ctxt->map.vaddr;
@@ -3513,7 +3528,8 @@ int hgsl_hyp_ctxt_create_v2(struct device *dev,
 		mutex_lock(&priv->lock);
 		ret = hgsl_mem_add_node(&priv->mem_allocated, ctxt_record_mem_node);
 		if (likely(!ret)) {
-			hgsl_trace_gpu_mem_total(priv, ctxt_record_mem_node->memdesc.size64);
+			hgsl_trace_gpu_mem_total(priv, ctxt_record_mem_node->memdesc.size64,
+					 ctxt_record_mem_node->flags, false);
 			ctxt_node_added = true;
 		}
 		mutex_unlock(&priv->lock);
@@ -3602,7 +3618,8 @@ out:
 				mutex_lock(&priv->lock);
 				rb_erase(&ctxt_record_mem_node->mem_rb_node, &priv->mem_allocated);
 				hgsl_trace_gpu_mem_total(priv,
-										-(ctxt_record_mem_node->memdesc.size64));
+						-(ctxt_record_mem_node->memdesc.size64),
+						ctxt_record_mem_node->flags, false);
 				mutex_unlock(&priv->lock);
 			}
 
@@ -3877,7 +3894,6 @@ out:
 		if (ret)
 			LOGE("habmm_unexport failed export_id %d ret = %d", export_id, ret);
 	}
-
 exit:
 	hgsl_hyp_channel_pool_put(hab_channel);
 	RPC_TRACE_DONE();
