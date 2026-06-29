@@ -102,7 +102,8 @@ static ssize_t total_mem_show(struct device *dev,
 {
 	struct qcom_hgsl *hgsl = dev_get_drvdata(dev);
 
-	return scnprintf(buf, PAGE_SIZE, "%lld\n", hgsl->total_mem_size);
+	return scnprintf(buf, PAGE_SIZE, "%lld\n",
+			atomic64_read(&hgsl->total_mem_size));
 }
 
 static DEVICE_ATTR_RO(total_mem);

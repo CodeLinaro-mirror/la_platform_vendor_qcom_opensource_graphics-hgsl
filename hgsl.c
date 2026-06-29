@@ -361,17 +361,32 @@ struct db_ignore_retpacket {
 } __packed;
 
 #ifdef CONFIG_TRACE_GPU_MEM
-void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta)
+void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta,
+			      uint32_t flags, bool is_mapped)
 {
 	struct qcom_hgsl *hgsl = priv->dev;
-	uint64_t size = atomic64_add_return(delta, &priv->total_mem_size);
-	uint64_t global_size = atomic64_add_return(delta, &hgsl->total_mem_size);
 
-	trace_gpu_mem_total(0, priv->pid, size);
-	trace_gpu_mem_total(0, 0, global_size);
+	trace_gpu_mem_total(0, priv->pid,
+			    (uint64_t)atomic64_add_return(delta, &priv->total_mem_size));
+	trace_gpu_mem_total(0, 0,
+			    (uint64_t)atomic64_add_return(delta, &hgsl->total_mem_size));
+
+	if (is_mapped) {
+		atomic64_add(delta, &priv->extern_mem_size);
+		atomic64_add(delta, &hgsl->extern_mem_size);
+	} else {
+		atomic64_add(delta, &priv->alloc_mem_size);
+		atomic64_add(delta, &hgsl->alloc_mem_size);
+	}
+
+	if (flags & GSL_MEMFLAGS_PROTECTED) {
+		atomic64_add(delta, &priv->prot_mem_size);
+		atomic64_add(delta, &hgsl->prot_mem_size);
+	}
 }
 #else
-static inline void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta)
+static inline void hgsl_trace_gpu_mem_total(struct hgsl_priv *priv, int64_t delta,
+					    uint32_t flags, bool is_mapped)
 {
 }
 #endif
@@ -498,13 +513,13 @@ static int db_queue_wait_freewords(struct doorbell_queue *dbq, uint32_t size)
 		return -EINVAL;
 
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		hard_reset_req = hgsl_dbq_get_state_info((uint32_t *)dbq->vbase,
 			HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 			HGSL_DBQ_CONTEXT_ANY,
 			HGSL_DBQ_HOST_TO_GVM_HARDRESET_REQ);
-
-		/* ensure read is done before comparison */
-		dma_rmb();
 
 		if (hard_reset_req == true) {
 			if (db_get_busy_state(dbq->vbase) == true)
@@ -540,6 +555,9 @@ static int dbcq_queue_wait_freewords(struct doorbell_context_queue *dbcq, uint32
 	unsigned int retry_count = 0;
 
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		if (db_context_queue_freedwords(dbcq) >= size)
 			return 0;
 
@@ -555,13 +573,13 @@ static int db_get_busy_state(void *dbq_base)
 {
 	unsigned int busy_state = false;
 
+	/* ensure read the latest value */
+	dma_rmb();
+
 	busy_state = hgsl_dbq_get_state_info((uint32_t *)dbq_base,
 		HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 		HGSL_DBQ_CONTEXT_ANY,
 		HGSL_DBQ_GVM_TO_HOST_HARDRESET_DISPATCH_IN_BUSY);
-
-	/* ensure read is done before comparison */
-	dma_rmb();
 
 	return busy_state;
 }
@@ -649,6 +667,7 @@ quit:
 	/* let user try again incase we miss to submit */
 	if (-ETIMEDOUT == ret) {
 		LOGE("Timed out to send db msg, try again\n");
+		hgsl_debugfs_dump_ctxts(&ctxt, 1, hgsl, false);
 		ret = -EAGAIN;
 	}
 	return ret;
@@ -679,13 +698,13 @@ static int db_send_msg(struct hgsl_priv	 *priv,
 
 	cmds = (struct hgsl_db_cmds *)msg_req->ptr_data;
 	do {
+		/* ensure read the latest value */
+		dma_rmb();
+
 		hard_reset_req = hgsl_dbq_get_state_info((uint32_t *)dbq->vbase,
 			HGSL_DBQ_METADATA_COOPERATIVE_RESET,
 			HGSL_DBQ_CONTEXT_ANY,
 			HGSL_DBQ_HOST_TO_GVM_HARDRESET_REQ);
-
-		/* ensure read is done before comparison */
-		dma_rmb();
 
 		if (hard_reset_req) {
 			if (msleep_interruptible(1)) {
@@ -1014,6 +1033,7 @@ static void hgsl_dbcq_close(struct hgsl_context *ctxt)
 			}
 			dma_buf_end_cpu_access(dbcq->queue_mem->dma_buf,
 						   DMA_BIDIRECTIONAL);
+			dbcq->queue_mem->kva_map.vaddr = NULL;
 		}
 		hgsl_sharedmem_free(dbcq->queue_mem);
 	}
@@ -1064,7 +1084,12 @@ static int hgsl_dbcq_open(struct hgsl_priv *priv,
 		goto err;
 	}
 
-	dma_buf_begin_cpu_access(dbcq->queue_mem->dma_buf, DMA_BIDIRECTIONAL);
+	ret = dma_buf_begin_cpu_access(dbcq->queue_mem->dma_buf, DMA_BIDIRECTIONAL);
+	if (ret) {
+		LOGE("failed to begin dbcq access");
+		goto err;
+	}
+
 	ret = dma_buf_vmap_unlocked(dbcq->queue_mem->dma_buf, &dbcq->map);
 	if (ret) {
 		LOGE("failed to map dbq buffer");
@@ -1160,7 +1185,11 @@ static int hgsl_init_ipcq_memnode(struct qcom_hgsl *hgsl, int allocate_size,
 		goto err;
 	}
 
-	dma_buf_begin_cpu_access(node->dma_buf, DMA_BIDIRECTIONAL);
+	ret = dma_buf_begin_cpu_access(node->dma_buf, DMA_BIDIRECTIONAL);
+	if (ret) {
+		LOGE("failed to begin ipcq access");
+		goto err;
+	}
 	ret = dma_buf_vmap_unlocked(node->dma_buf, &(hgsl->ipcq_memnode_vmap[dev_idx][q_type]));
 	if (ret) {
 		LOGE("failed to map node buffer");
@@ -1393,7 +1422,7 @@ static int hgsl_dbcq_issue_cmd(struct hgsl_priv  *priv,
 	req.msg_dwords = msg_dwords;
 	req.ptr_data = cmds;
 
-	if (!ctxt->is_killed)
+	if (likely(!READ_ONCE(ctxt->in_destroy)))
 		ret = dbcq_send_msg(priv, &db_msg_id, &req, &resp, ctxt);
 	else {
 		/* Retire ts immediately*/
@@ -1403,7 +1432,8 @@ static int hgsl_dbcq_issue_cmd(struct hgsl_priv  *priv,
 			*timestamp);
 
 		/* Trigger event to waitfor ts thread */
-		_signal_contexts(hgsl, ctxt->devhandle);
+		wake_up_all(&ctxt->wait_q);
+		hgsl_process_event_group(hgsl, &ctxt->event_group);
 		ret = 0;
 	}
 
@@ -1540,7 +1570,7 @@ static int hgsl_db_issue_cmd(struct hgsl_priv *priv,
 	req.msg_dwords = msg_dwords;
 	req.ptr_data = cmds;
 
-	if (!ctxt->is_killed)
+	if (likely(!READ_ONCE(ctxt->in_destroy)))
 		ret = db_send_msg(priv, &db_msg_id, &req, &resp, ctxt);
 	else {
 		/* Retire ts immediately*/
@@ -1550,7 +1580,8 @@ static int hgsl_db_issue_cmd(struct hgsl_priv *priv,
 			*timestamp);
 
 		/* Trigger event to waitfor ts thread */
-		_signal_contexts(hgsl, ctxt->devhandle);
+		wake_up_all(&ctxt->wait_q);
+		hgsl_process_event_group(hgsl, &ctxt->event_group);
 		ret = 0;
 	}
 
@@ -1752,7 +1783,9 @@ static int hgsl_dbq_init(struct qcom_hgsl *hgsl,
 	dbq->ibdesc_max_size = hgsl->dbq_info[dbq_idx].ibdesc_max_size;
 	atomic_set(&dbq->seq_num, 0);
 
-	dma_buf_begin_cpu_access(dbq->dma, DMA_BIDIRECTIONAL);
+	ret = dma_buf_begin_cpu_access(dbq->dma, DMA_BIDIRECTIONAL);
+	if (ret)
+		goto err;
 	ret = dma_buf_vmap_unlocked(dbq->dma, &dbq->map);
 	if (ret)
 		goto err;
@@ -1784,7 +1817,7 @@ err:
 }
 
 static void _cleanup_shadow(struct hgsl_hab_channel_t *hab_channel,
-				struct hgsl_context *ctxt)
+				struct hgsl_context *ctxt, bool skip_hab)
 {
 	struct hgsl_mem_node *mem_node = ctxt->shadow_ts_node;
 
@@ -1795,6 +1828,8 @@ static void _cleanup_shadow(struct hgsl_hab_channel_t *hab_channel,
 		if (ctxt->shadow_ts) {
 			dma_buf_vunmap_unlocked(mem_node->dma_buf, &ctxt->map);
 			ctxt->shadow_ts = NULL;
+			mem_node->kva_map.vaddr = NULL;
+			ctxt->map.vaddr = NULL;
 		}
 		dma_buf_end_cpu_access(mem_node->dma_buf, DMA_FROM_DEVICE);
 	}
@@ -1805,10 +1840,12 @@ static void _cleanup_shadow(struct hgsl_hab_channel_t *hab_channel,
 		 * so now request to unmap the buffer after sending RPC call
 		 * to destroy the context.
 		 */
-		hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
+		if (!skip_hab)
+			hgsl_hyp_mem_unmap_smmu(hab_channel, mem_node);
 		hgsl_sharedmem_free(mem_node);
 	} else {
-		hgsl_hyp_put_shadowts_mem(hab_channel, mem_node);
+		if (!skip_hab)
+			hgsl_hyp_put_shadowts_mem(hab_channel, mem_node);
 		hgsl_mem_node_free(mem_node);
 	}
 
@@ -1841,6 +1878,7 @@ static inline void _destroy_context(struct kref *kref)
 	dma_wmb();
 
 	WRITE_ONCE(ctxt->destroyed, true);
+	wake_up_all(&ctxt->destroyed_wq);
 }
 
 struct hgsl_context *hgsl_get_context(struct qcom_hgsl *hgsl,
@@ -1954,7 +1992,9 @@ static void hgsl_get_shadowts_mem(struct hgsl_hab_channel_t *hab_channel,
 
 	dma_buf = ctxt->shadow_ts_node->dma_buf;
 	if (dma_buf) {
-		dma_buf_begin_cpu_access(dma_buf, DMA_FROM_DEVICE);
+		ret = dma_buf_begin_cpu_access(dma_buf, DMA_FROM_DEVICE);
+		if (ret)
+			goto out;
 		ret = dma_buf_vmap_unlocked(dma_buf, &ctxt->map);
 		if (ret)
 			goto out;
@@ -1964,7 +2004,7 @@ static void hgsl_get_shadowts_mem(struct hgsl_hab_channel_t *hab_channel,
 
 out:
 	if (ret)
-		_cleanup_shadow(hab_channel, ctxt);
+		_cleanup_shadow(hab_channel, ctxt, false);
 }
 
 static int hgsl_ioctl_get_shadowts_mem(
@@ -2212,7 +2252,9 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	struct qcom_hgsl *hgsl = priv->dev;
 	struct hgsl_context *ctxt = NULL;
 	int ret;
+	long wait_ret;
 	bool put_channel = false;
+	bool skip_hab = false;
 	struct doorbell_queue *dbq = NULL;
 	struct hgsl_pagetable *pt = NULL;
 
@@ -2256,8 +2298,21 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 	wake_up_all(&ctxt->wait_q);
 	hgsl_put_context(ctxt);
 
-	while (!READ_ONCE(ctxt->destroyed))
-		cpu_relax();
+	/* On timeout or signal skip teardown: freeing while kref > 0
+	 * causes use-after-free; leak the context instead. */
+	wait_ret = wait_event_killable_timeout(ctxt->destroyed_wq,
+			READ_ONCE(ctxt->destroyed), msecs_to_jiffies(5000));
+	if (wait_ret == 0) {
+		LOGE("ctx:%d destroy timed out, context leaked\n",
+			ctxt->context_id);
+		ret = -ETIMEDOUT;
+		goto out;
+	} else if (wait_ret < 0) {
+		LOGE("ctx:%d destroy interrupted by fatal signal, context leaked\n",
+			ctxt->context_id);
+		ret = wait_ret;
+		goto out;
+	}
 
 	mutex_lock(&hgsl->destroying_ctx_list_lock);
 	list_del_init(&ctxt->node);
@@ -2273,10 +2328,12 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 			goto out;
 		}
 		put_channel = true;
+		/* workqueue path — PVM may exit before we finish; use short timeout */
+		hab_channel->teardown = true;
 	}
 
 	if (!ctxt->is_fe_shadow)
-		_cleanup_shadow(hab_channel, ctxt);
+		_cleanup_shadow(hab_channel, ctxt, false);
 
 	ret = hgsl_hyp_ctxt_destroy(hab_channel,
 			ctxt->devhandle, ctxt->context_id, rval, ctxt->dbcq_export_id);
@@ -2284,7 +2341,9 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 		mutex_lock(&priv->lock);
 		rb_erase(&ctxt->ctxt_record_mem_node->mem_rb_node, &priv->mem_allocated);
 		mutex_unlock(&priv->lock);
-		hgsl_trace_gpu_mem_total(priv, -(ctxt->ctxt_record_mem_node->memdesc.size64));
+		hgsl_trace_gpu_mem_total(priv,
+				-(ctxt->ctxt_record_mem_node->memdesc.size64),
+				ctxt->ctxt_record_mem_node->flags, false);
 		pt = hgsl_get_ctxt_pagetable(priv);
 		(void)hgsl_mmu_put_gpuaddr(pt, ctxt->ctxt_record_mem_node, hgsl->use_single_pt);
 		(void)hgsl_mmu_unmap(hgsl, pt, ctxt->ctxt_record_mem_node, true, dev_hnd);
@@ -2292,11 +2351,18 @@ static int hgsl_ctxt_destroy(struct hgsl_priv *priv,
 		ctxt->ctxt_record_mem_node = NULL;
 	}
 
-	hgsl_dbcq_close(ctxt);
+	/*
+	 * PVM already exited (habmm_unexport EBUSY, ret != 0) on the workqueue
+	 * path (can_retry=false) — skip HAB RPCs but still free GVM-side
+	 * dma_buf and mem_node to avoid leaks.
+	 */
+	if (ret == -EBUSY && !can_retry)
+		skip_hab = true;
 
 	if (ctxt->is_fe_shadow)
-		_cleanup_shadow(hab_channel, ctxt);
+		_cleanup_shadow(hab_channel, ctxt, skip_hab);
 
+	hgsl_dbcq_close(ctxt);
 	hgsl_free(ctxt);
 out:
 	if (put_channel)
@@ -2387,6 +2453,7 @@ static int hgsl_ioctl_ctxt_create(
 
 	kref_init(&ctxt->kref);
 	init_waitqueue_head(&ctxt->wait_q);
+	init_waitqueue_head(&ctxt->destroyed_wq);
 	mutex_init(&ctxt->lock);
 
 	rt_mutex_init(&ctxt->drawq_lock);
@@ -2433,13 +2500,13 @@ out:
 			/* Remove the event group from the list */
 			hgsl_del_event_group(hgsl, &ctxt->event_group);
 			if (!ctxt->is_fe_shadow)
-				_cleanup_shadow(hab_channel, ctxt);
+				_cleanup_shadow(hab_channel, ctxt, false);
 			hgsl_hyp_ctxt_destroy(hab_channel, ctxt->devhandle,
 						ctxt->context_id, NULL,
 						ctxt->dbcq_export_id);
 			hgsl_dbcq_close(ctxt);
 			if (ctxt->is_fe_shadow)
-				_cleanup_shadow(hab_channel, ctxt);
+				_cleanup_shadow(hab_channel, ctxt, false);
 
 			kfree(ctxt->timeline);
 		}
@@ -2738,7 +2805,8 @@ static int hgsl_ioctl_mem_alloc(
 	else {
 		params->fd = mem_fd;
 		fd_install(params->fd, mem_node->dma_buf->file);
-		hgsl_trace_gpu_mem_total(priv, mem_node->memdesc.size64);
+		hgsl_trace_gpu_mem_total(priv, mem_node->memdesc.size64,
+					 mem_node->flags, false);
 	}
 	mutex_unlock(&priv->lock);
 
@@ -2827,7 +2895,8 @@ static int hgsl_ioctl_mem_free(
 			if (use_fv)
 				hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
 
-			hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
+			hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64),
+						 node_found->flags, false);
 			hgsl_sharedmem_free(node_found);
 		} else {
 			LOGE("hgsl_hyp_mem_unmap_smmu failed %d", ret);
@@ -2988,7 +3057,8 @@ static int hgsl_ioctl_mem_map_smmu(
 	mutex_lock(&priv->lock);
 	ret = hgsl_mem_add_node(&priv->mem_mapped, mem_node);
 	if (likely(!ret))
-		hgsl_trace_gpu_mem_total(priv, mem_node->memdesc.size64);
+		hgsl_trace_gpu_mem_total(priv, mem_node->memdesc.size64,
+					 mem_node->flags, true);
 	mutex_unlock(&priv->lock);
 
 out:
@@ -3058,11 +3128,11 @@ static int hgsl_ioctl_mem_unmap_smmu(
 				hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
 
 			hgsl_trace_gpu_mem_total(priv,
-					-(node_found->memdesc.size64));
+					-(node_found->memdesc.size64),
+					node_found->flags, true);
 			hgsl_mem_node_free(node_found);
 		} else {
 			LOGE("mem_unmap_smmu failed %d", ret);
-
 			mutex_lock(&priv->lock);
 			ret = hgsl_mem_add_node(&priv->mem_mapped, node_found);
 			mutex_unlock(&priv->lock);
@@ -4103,7 +4173,6 @@ static int hgsl_open(struct inode *inodep, struct file *filep)
 
 	list_add(&priv->node, &hgsl->active_list);
 	hgsl_sysfs_client_init(priv);
-	hgsl_debugfs_client_init(priv);
 
 out:
 	if (ret != 0)
@@ -4133,6 +4202,7 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 		LOGE("Failed to get channel %d", ret);
 		goto out;
 	}
+	hab_channel->teardown = true;
 
 	ret = hgsl_hyp_notify_cleanup(hab_channel, HGSL_CLEANUP_WAIT_SLICE_IN_MS);
 	if (ret == -ETIMEDOUT)
@@ -4162,7 +4232,8 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
 			hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE)
 			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
-		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
+		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64),
+					 node_found->flags, true);
 
 		next = rb_next(&node_found->mem_rb_node);
 		rb_erase(&node_found->mem_rb_node, &priv->mem_mapped);
@@ -4189,7 +4260,8 @@ static int hgsl_cleanup(struct hgsl_priv *priv)
 			!(node_found->flags & GSL_MEMFLAGS_PROTECTED) &&
 			(hgsl_mmu_get_mmutype(hgsl) != HGSL_MMU_TYPE_NONE))
 			hgsl_mmu_put_gpuaddr(pt, node_found, hgsl->use_single_pt);
-		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64));
+		hgsl_trace_gpu_mem_total(priv, -(node_found->memdesc.size64),
+					 node_found->flags, false);
 
 		next = rb_next(&node_found->mem_rb_node);
 		rb_erase(&node_found->mem_rb_node, &priv->mem_allocated);
@@ -4298,7 +4370,6 @@ static int hgsl_release(struct inode *inodep, struct file *filep)
 		WARN_ON(1);
 	else if (--priv->open_count == 0) {
 		list_move(&priv->node, &hgsl->release_list);
-		hgsl_debugfs_client_release(priv);
 		hgsl_sysfs_client_release(priv);
 		queue_work(hgsl->release_wq, &hgsl->release_work);
 	}
@@ -5144,7 +5215,6 @@ static int hgsl_suspend(struct device *dev)
 	if (hgsl->lockless_wq)
 		flush_workqueue(hgsl->lockless_wq);
 
-	// TODO: shall we disable the interrupt from GMU? and enable them after resume?
 	return 0;
 }
 
@@ -5176,16 +5246,26 @@ static int hgsl_resume(struct device *dev)
 	mutex_unlock(&hgsl->mutex);
 
 	/*
-		* There could be a scenario when GVM submit some work to GMU
-		* just before going to suspend, in this case, the GMU will
-		* not submit it to RB and when GMU resume(FW reload) happens,
-		* it submits the work to GPU and fire the ts_retire to GVM.
-		* At this point, the GVM is not up so it may miss the
-		* interrupt from GMU so check if there is any ts_retire by
-		* reading the shadow timestamp.
-		*/
+	 * Catch up any timestamp retirements that occurred during suspend.
+	 *
+	 * Two paths need separate handling because they use different
+	 * notification mechanisms at runtime:
+	 *
+	 * TCSR path: hgsl_tcsr_isr → queue_work(ts_retire_work) → hgsl_retire_common
+	 *   Covered by the queue_work() call below.
+	 *
+	 * GMUGOS path: hgsl_gmugos_ts_retire (threaded IRQ) → hgsl_retire_common
+	 *   NOT covered by ts_retire_work.  Must call hgsl_retire_common()
+	 *   directly for each active GMUGOS device, mirroring what the
+	 *   threaded IRQ handler would have done.
+	 */
 	if (hgsl->wq != NULL)
 		queue_work(hgsl->wq, &hgsl->ts_retire_work);
+
+	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
+		if (hgsl->gmugos[i].dev_hnd)
+			hgsl_retire_common(hgsl, hgsl->gmugos[i].dev_hnd);
+	}
 
 	if(true == of_property_read_bool(pdev->dev.of_node, "notify-resume")) {
 

@@ -45,6 +45,26 @@ int gsl_hab_recv(int habfd, unsigned char *p, size_t sz, int interruptible)
 	return ret;
 }
 
+int gsl_hab_recv_timeout(int habfd, unsigned char *p, size_t sz,
+			 int interruptible, uint32_t timeout_ms)
+{
+	int ret = 0;
+	uint32_t size_bytes = 0;
+	uint32_t flags = HABMM_SOCKET_RECV_FLAGS_TIMEOUT;
+
+	if (!interruptible)
+		flags |= HABMM_SOCKET_RECV_FLAGS_UNINTERRUPTIBLE;
+
+	size_bytes = (uint32_t)sz;
+	ret = habmm_socket_recv(habfd, p, &size_bytes, timeout_ms, flags);
+
+	if (ret && (ret != -EINTR) && (ret != -ETIMEDOUT))
+		LOGE("habmm_socket_recv failed, %d, socket %x. size_bytes %u, expects %u",
+				ret, habfd, size_bytes, sz);
+
+	return ret;
+}
+
 int gsl_hab_send(int habfd, unsigned char *p, size_t sz)
 {
 	return habmm_socket_send(habfd, p, sz, 0);
