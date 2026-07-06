@@ -34,6 +34,8 @@
 #define HGSL_DRAWOBJ_END_OF_FRAME      HGSL_CMDBATCH_END_OF_FRAME
 #define HGSL_DRAWOBJ_SYNC              HGSL_CMDBATCH_SYNC
 
+#define hgsl_drawobj_profiling_buffer hgsl_cmdbatch_profiling_buffer
+
 #define HGSL_GPU_0 0
 #define HGSL_GPU_1 1
 
@@ -352,7 +354,6 @@ struct hgsl_context {
 	uint32_t last_ts;
 	struct hgsl_hsync_timeline *timeline;
 	uint32_t queued_ts;
-	bool is_killed;
 	int tcsr_idx;
 	struct mutex lock;
 	struct doorbell_context_queue *dbcq;
