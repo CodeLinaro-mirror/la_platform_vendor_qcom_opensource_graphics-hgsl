@@ -167,8 +167,6 @@ enum hgsl_add_buffer_state_t hgsl_pm4_add_buffer(struct hgsl_pm4_buffers_t *bufs
 			pdesc->copy_ptr = NULL;
 			if (desc != NULL)
 				*desc = pdesc;
-			else
-				LOGI("Input pointer desc is NULL");
 
 			bufs->num_buffers++;
 			error_printed = GSL_FALSE;
@@ -222,6 +220,7 @@ static uint32_t hgsl_pm4_parse_type7(unsigned int *vaddr, struct hgsl_priv *priv
 	uint64_t new_gpuaddr = 0;
 	uint32_t opcode = 0;
 	size_t size = 0;
+	unsigned int *shader_vaddr = NULL;
 
 	if (!vaddr)
 		goto out;
@@ -239,9 +238,12 @@ static uint32_t hgsl_pm4_parse_type7(unsigned int *vaddr, struct hgsl_priv *priv
 		new_gpuaddr = (new_gpuaddr << 32) |
 			(vaddr[1] & HLSQ_LOAD_CMD_1_EXTSRCADDRLO_MASK);
 		size = hgsl_pm4_get_load_state_size(vaddr[0]);
-		if (size)
-			hgsl_pm4_add_buffer(bufs, new_gpuaddr, vaddr, size,
-				HGSL_BUFTYPE_SHADER, NULL);
+		if (size) {
+			shader_vaddr = hgsl_get_va_from_gpuaddr(priv, new_gpuaddr, size << 2);
+			if (shader_vaddr)
+				hgsl_pm4_add_buffer(bufs, new_gpuaddr, shader_vaddr, size,
+					HGSL_BUFTYPE_SHADER, NULL);
+		}
 		break;
 	case CP_INDIRECT_BUFFER_PFE:
 		size = vaddr[2] & 0xFFFFF;
@@ -339,7 +341,7 @@ static int hgsl_pm4_parse_internal(uint64_t gpuaddr, struct hgsl_priv *priv,  si
 			break;
 			case 7:
 			count = hgsl_pm4_parse_type7(cpy_ptr, priv, type, bufs,
-						in_fault, parse_depth) + 1;
+						in_fault, parse_depth + 1) + 1;
 			break;
 			default:
 			count = sizedwords + 1; /* Error out */
