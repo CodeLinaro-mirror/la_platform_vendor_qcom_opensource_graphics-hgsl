@@ -516,8 +516,10 @@ static int hgsl_iommu_set_ttbr0(struct hgsl_iommu_context *context)
 	if (adreno_smmu->cookie)
 		cfg = adreno_smmu->get_ttbr1_cfg(adreno_smmu->cookie);
 
-	if (!cfg)
+	if (!cfg) {
+		kfree(iommu_pt);
 		return -ENODEV;
+	}
 
 	iommu_pt->cfg.quirks &= ~IO_PGTABLE_QUIRK_ARM_TTBR1;
 	iommu_pt->cfg.tlb = &hgsl_iopgtbl_tlb_ops;
@@ -582,10 +584,14 @@ static int hgsl_iommu_setup_context(struct hgsl_mmu *mmu,
 		goto out;
 	}
 #else
+	/*
+	 * arm-smmu may not have probed yet. Return EPROBE_DEFER so the kernel
+	 * deferred-probe mechanism retries after arm-smmu is ready.
+	 */
 	context->domain = iommu_get_domain_for_dev(&context->pdev->dev);
 	if (!context->domain) {
-		LOGE("iommu_get_domain_for_dev failed for %s\n", name);
-		ret = -ENODEV;
+		LOGI("iommu domain not ready for %s, deferring probe\n", name);
+		ret = -EPROBE_DEFER;
 		goto out;
 	}
 
@@ -593,6 +599,7 @@ static int hgsl_iommu_setup_context(struct hgsl_mmu *mmu,
 
 	if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64))) {
 		dev_err(&pdev->dev, "Failed to set 64-bit DMA mask\n");
+		context->domain = NULL;
 		ret = -EIO;
 		goto out;
 	}
@@ -775,7 +782,6 @@ static int iommu_probe_user_context(struct qcom_hgsl *hgsl_dev,
 			atomic_set(&iommu->user_context[dev_num].pagetables, 0);
 
 			snprintf(node_name, sizeof(node_name), "gfx3d_user_%d", dev_num);
-
 			ret[dev_num] = hgsl_iommu_setup_context(mmu, node, &iommu->user_context[dev_num],
 							node_name, fault_handlers[dev_num]);
 			if (ret[dev_num])
@@ -792,9 +798,10 @@ static int iommu_probe_user_context(struct qcom_hgsl *hgsl_dev,
 				dev_num);
 	}
 
+	if (ret[HGSL_GPU_0] == -EPROBE_DEFER || ret[HGSL_GPU_1] == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
+
 	if (ret[HGSL_GPU_0] && ret[HGSL_GPU_1]) {
-		LOGE("hgsl_iommu_setup_context() failed for both GPU ret = %d and %d",
-				ret[HGSL_GPU_0], ret[HGSL_GPU_1]);
 		goto err;
 	}
 
@@ -975,6 +982,11 @@ int hgsl_iommu_bind(struct platform_device *pdev, struct qcom_hgsl *hgsl_dev)
 	ret = iommu_probe_user_context(hgsl_dev, node);
 	if (ret) {
 		LOGE("iommu_probe_user_context() failed ret=%d", ret);
+		/* Do NOT depopulate on EPROBE_DEFER: child devices (gfx3d_user_*)
+		 * must stay alive so arm-smmu can attach them to iommu groups.
+		 */
+		if (ret == -EPROBE_DEFER)
+			return ret;
 		of_platform_depopulate(&pdev->dev);
 		goto err;
 	}

@@ -237,7 +237,8 @@ static int hgsl_mmu_populate_cbs(struct platform_device *pdev, const char *name)
 			 child, dev_name(&child_pdev->dev));
 		put_device(&child_pdev->dev);
 		of_node_put(child);
-		ret = -ENODEV;
+		/* Device already exists — treat as success, IOMMU will attach it. */
+		ret = 0;
 		goto out;
 	}
 
