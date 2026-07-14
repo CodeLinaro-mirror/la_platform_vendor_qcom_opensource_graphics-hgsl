@@ -107,11 +107,29 @@ int hgsl_hsync_fence_create_fd(struct hgsl_context *context,
 
 	ret = _add_fence_event(context, ts);
 	if (unlikely(ret)) {
+		struct hgsl_hsync_fence *cur;
+		bool removed = false;
+
+		/*
+		 * fence may have already been removed from timeline->fence_list
+		 * and had its list-owned reference released by a concurrent
+		 * hgsl_hsync_timeline_signal() (which unlinks via list_move_tail(),
+		 * so list_empty() cannot be used to detect this). Search the list
+		 * under the same lock to determine ownership before releasing the
+		 * reference, to avoid a double dma_fence_put()/UAF.
+		 */
 		spin_lock_irqsave(&timeline->lock, flags);
-		list_del_init(&fence->child_list);
+		list_for_each_entry(cur, &timeline->fence_list, child_list) {
+			if (cur == fence) {
+				list_del_init(&fence->child_list);
+				removed = true;
+				break;
+			}
+		}
 		spin_unlock_irqrestore(&timeline->lock, flags);
 		fput(fence->sync_file->file);
-		dma_fence_put(&fence->fence);
+		if (removed)
+			dma_fence_put(&fence->fence);
 		goto err;
 	}
 
