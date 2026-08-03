@@ -304,6 +304,10 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 	trace_ctxt_detach_drawobjs(ctxt);
 
 	hgsl_flush_event_group(hgsl, &ctxt->event_group);
+
+	hgsl_dispatch_queue_context(ctxt);
+	kthread_flush_worker(ctxt->dispatch->worker);
+
 	rt_mutex_lock(&ctxt->drawq_lock);
 	while (ctxt->drawq_head != ctxt->drawq_tail) {
 		struct hgsl_drawobj *drawobj =
@@ -322,8 +326,6 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 		hgsl_drawobj_destroy(list[i]);
 	}
 
-	hgsl_dispatch_queue_context(ctxt);
-	kthread_flush_worker(ctxt->dispatch->worker);
 	hgsl_reclaim_drawobjs(ctxt);
 	hgsl_put_context(ctxt);
 }

@@ -71,8 +71,8 @@ static void _ctxt_info_show(struct seq_file *s, struct hgsl_context *ctxt,
 	hgsl_debugfs_printf(s, "  ctx=[%u:%u] {\n",
 		ctxt->devhandle, ctxt->context_id);
 	hgsl_debugfs_printf(s,
-		"    is_fe_shadow=%u, in_destroy=%u, is_killed=%u, dbq_info=0x%x, flags=0x%x, tcsr_idx=%d, db_signal=%u;\n",
-		ctxt->is_fe_shadow, READ_ONCE(ctxt->in_destroy), ctxt->is_killed,
+		"    is_fe_shadow=%u, in_destroy=%u, dbq_info=0x%x, flags=0x%x, tcsr_idx=%d, db_signal=%u;\n",
+		ctxt->is_fe_shadow, READ_ONCE(ctxt->in_destroy),
 		ctxt->dbq_info, ctxt->flags, ctxt->tcsr_idx, ctxt->db_signal);
 	{
 		char submitted_ts_str[32];
@@ -165,7 +165,7 @@ static void _show_isyncs(struct seq_file *s, struct qcom_hgsl *hgsl)
 			found = 1;
 		}
 		hgsl_debugfs_printf(s,
-			"  %s: t_context=0x%llx, signaled_ts=%u, flags=0x%x, 64bit=%u\n",
+			"  %s: t_context=0x%llx, signaled_ts=%llu, flags=0x%x, 64bit=%u\n",
 			cur->name, cur->context, cur->last_ts,
 			cur->flags, cur->is64bits);
 	}

@@ -252,13 +252,13 @@ static int hgsl_tcsr_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int hgsl_tcsr_remove(struct platform_device *pdev)
+static DRV_REMOVE_RET hgsl_tcsr_remove(struct platform_device *pdev)
 {
 	struct hgsl_tcsr *tcsr = platform_get_drvdata(pdev);
 
 	mutex_destroy(&tcsr->dev_mutex);
 
-	return 0;
+	DRV_REMOVE_RETURN(0);
 }
 
 struct platform_driver hgsl_tcsr_driver = {
