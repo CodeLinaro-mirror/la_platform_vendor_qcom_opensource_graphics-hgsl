@@ -388,17 +388,19 @@ static int hgsl_mmu_dev_probe(struct platform_device *pdev)
 	return component_add(&pdev->dev, &hgsl_mmu_component_ops);
 }
 
-static int hgsl_mmu_dev_remove(struct platform_device *pdev)
+
+static DRV_REMOVE_RET hgsl_mmu_dev_remove(struct platform_device *pdev)
 {
 	if (of_device_is_compatible(pdev->dev.of_node, "qcom,smmu-hgsl-cb")) {
 		component_del(&pdev->dev, &hgsl_mmu_cb_component_ops);
-		return 0;
+		goto out;
 	}
 
 	component_del(&pdev->dev, &hgsl_mmu_component_ops);
 
 	of_platform_depopulate(&pdev->dev);
-	return 0;
+out:
+	DRV_REMOVE_RETURN(0);
 }
 
 static const struct of_device_id mmu_match_table[] = {

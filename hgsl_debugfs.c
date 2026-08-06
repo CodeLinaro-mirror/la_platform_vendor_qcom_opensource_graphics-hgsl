@@ -165,7 +165,7 @@ static void _show_isyncs(struct seq_file *s, struct qcom_hgsl *hgsl)
 			found = 1;
 		}
 		hgsl_debugfs_printf(s,
-			"  %s: t_context=0x%llx, signaled_ts=%u, flags=0x%x, 64bit=%u\n",
+			"  %s: t_context=0x%llx, signaled_ts=%llu, flags=0x%x, 64bit=%u\n",
 			cur->name, cur->context, cur->last_ts,
 			cur->flags, cur->is64bits);
 	}

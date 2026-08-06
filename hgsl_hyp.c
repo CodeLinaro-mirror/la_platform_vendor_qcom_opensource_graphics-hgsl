@@ -3006,7 +3006,7 @@ void hgsl_hyp_deinit_ipcq(struct qcom_hgsl *hgsl, int dev_idx)
 
 	for (i = 0; i < HGSL_IPCQ_NUM; i++) {
 		if (hgsl->ipcq_memnode[dev_idx][i] && hgsl->ipcq_memnode[dev_idx][i]->dma_buf
-			&& hgsl->ipcq_memnode[dev_idx][i]->kva_map.vaddr) {
+			&& hgsl->ipcq_memnode_vmap[dev_idx][i].vaddr) {
 			dma_buf_vunmap_unlocked(hgsl->ipcq_memnode[dev_idx][i]->dma_buf,
 				&(hgsl->ipcq_memnode_vmap[dev_idx][i]));
 			dma_buf_end_cpu_access(hgsl->ipcq_memnode[dev_idx][i]->dma_buf,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
 CONFIG_QCOM_HGSL = m
+CONFIG_QCOM_HGSL_TCSR_SIGNAL = y
 
 KDIR := $(TOP)/kernel_platform/common
 

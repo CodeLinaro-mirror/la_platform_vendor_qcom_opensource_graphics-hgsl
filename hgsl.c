@@ -401,7 +401,7 @@ static void hgsl_reg_write(struct reg *reg, unsigned int off,
 		return;
 
 	if (WARN(off > reg->size,
-		"Invalid reg write:0x%x, reg size:0x%x\n",
+		"Invalid reg write:0x%x, reg size:0x%lx\n",
 						off, reg->size))
 		return;
 
@@ -1148,7 +1148,7 @@ static void hgsl_free_per_device_ipc_queues(struct qcom_hgsl *hgsl, uint32_t dev
 	if (!mem_node)
 		return;
 
-	if (mem_node->dma_buf && mem_node->kva_map.vaddr) {
+	if (mem_node->dma_buf && vmap->vaddr) {
 		dma_buf_vunmap_unlocked(mem_node->dma_buf, vmap);
 		dma_buf_end_cpu_access(mem_node->dma_buf, DMA_BIDIRECTIONAL);
 		memset(vmap, 0, sizeof(struct iosys_map));
@@ -1201,7 +1201,7 @@ static int hgsl_init_ipcq_memnode(struct qcom_hgsl *hgsl, int allocate_size,
 
 err:
 	if (node) {
-		if (node->dma_buf && node->kva_map.vaddr) {
+		if (node->dma_buf && hgsl->ipcq_memnode_vmap[dev_idx][q_type].vaddr) {
 			dma_buf_vunmap_unlocked(node->dma_buf,
 				&(hgsl->ipcq_memnode_vmap[dev_idx][q_type]));
 			dma_buf_end_cpu_access(node->dma_buf, DMA_BIDIRECTIONAL);
@@ -5538,7 +5538,8 @@ exit_dereg:
 	return ret;
 }
 
-static int qcom_hgsl_remove(struct platform_device *pdev)
+
+static DRV_REMOVE_RET qcom_hgsl_remove(struct platform_device *pdev)
 {
 	struct qcom_hgsl *hgsl = platform_get_drvdata(pdev);
 	struct hgsl_tcsr *tcsr_sender, *tcsr_receiver;
@@ -5604,7 +5605,7 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 	qcom_hgsl_deregister(pdev);
 
 out:
-	return 0;
+	DRV_REMOVE_RETURN(0);
 }
 
 static const struct dev_pm_ops hgsl_pm_ops = {

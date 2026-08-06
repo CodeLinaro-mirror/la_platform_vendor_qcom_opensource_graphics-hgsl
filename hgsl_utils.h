@@ -13,6 +13,15 @@
 #include <linux/sched/signal.h>
 #include <linux/stdarg.h>
 #include <linux/regmap.h>
+#include <linux/version.h>
+
+#if KERNEL_VERSION(6, 10, 0) > LINUX_VERSION_CODE
+#define DRV_REMOVE_RET         int
+#define DRV_REMOVE_RETURN(val) return (val)
+#else
+#define DRV_REMOVE_RET         void
+#define DRV_REMOVE_RETURN(val) return
+#endif
 
 enum {
 	LOG_LEVEL_ERROR,
