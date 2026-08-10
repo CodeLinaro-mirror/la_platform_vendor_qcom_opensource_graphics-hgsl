@@ -182,8 +182,15 @@ static int gsl_rpc_send_(const char *fname, int line_num, void *data,
 static int gsl_rpc_recv_(const char *fname, int line_num, void *data,
 	size_t size, struct hgsl_hab_channel_t *hab_channel, int interruptible)
 {
-	int ret = gsl_hab_recv(hab_channel->socket,
-		(unsigned char *)data, size, interruptible);
+	int ret;
+
+	if (hab_channel->teardown)
+		ret = gsl_hab_recv_timeout(hab_channel->socket,
+			(unsigned char *)data, size, interruptible,
+			HGSL_HAB_RECV_TIMEOUT_MS);
+	else
+		ret = gsl_hab_recv(hab_channel->socket,
+			(unsigned char *)data, size, interruptible);
 
 	return ret;
 }
@@ -607,6 +614,7 @@ void hgsl_hyp_channel_pool_put_unsafe(struct hgsl_hab_channel_t *hab_channel)
 		if (hab_channel->wait_retry)
 			LOGE("put channel waiting for retry");
 		hab_channel->busy = false;
+		hab_channel->teardown = false;
 		list_del(&hab_channel->node);
 		list_add_tail(&hab_channel->node, &priv->free_channels);
 		LOGD("put %p back to free pool", hab_channel);
@@ -2998,7 +3006,7 @@ void hgsl_hyp_deinit_ipcq(struct qcom_hgsl *hgsl, int dev_idx)
 
 	for (i = 0; i < HGSL_IPCQ_NUM; i++) {
 		if (hgsl->ipcq_memnode[dev_idx][i] && hgsl->ipcq_memnode[dev_idx][i]->dma_buf
-			&& hgsl->ipcq_memnode[dev_idx][i]->kva_map.vaddr) {
+			&& hgsl->ipcq_memnode_vmap[dev_idx][i].vaddr) {
 			dma_buf_vunmap_unlocked(hgsl->ipcq_memnode[dev_idx][i]->dma_buf,
 				&(hgsl->ipcq_memnode_vmap[dev_idx][i]));
 			dma_buf_end_cpu_access(hgsl->ipcq_memnode[dev_idx][i]->dma_buf,
@@ -3520,7 +3528,8 @@ int hgsl_hyp_ctxt_create_v2(struct device *dev,
 		mutex_lock(&priv->lock);
 		ret = hgsl_mem_add_node(&priv->mem_allocated, ctxt_record_mem_node);
 		if (likely(!ret)) {
-			hgsl_trace_gpu_mem_total(priv, ctxt_record_mem_node->memdesc.size64);
+			hgsl_trace_gpu_mem_total(priv, ctxt_record_mem_node->memdesc.size64,
+					 ctxt_record_mem_node->flags, false);
 			ctxt_node_added = true;
 		}
 		mutex_unlock(&priv->lock);
@@ -3609,7 +3618,8 @@ out:
 				mutex_lock(&priv->lock);
 				rb_erase(&ctxt_record_mem_node->mem_rb_node, &priv->mem_allocated);
 				hgsl_trace_gpu_mem_total(priv,
-										-(ctxt_record_mem_node->memdesc.size64));
+						-(ctxt_record_mem_node->memdesc.size64),
+						ctxt_record_mem_node->flags, false);
 				mutex_unlock(&priv->lock);
 			}
 

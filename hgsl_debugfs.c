@@ -132,8 +132,10 @@ static void _ctxt_info_show(struct seq_file *s, struct hgsl_context *ctxt,
 /* Per-client snapshot collected in the !atomic path. */
 struct hgsl_client_info {
 	pid_t    pid;
-	int64_t  alloc_mem;
-	int64_t  mapped_mem;
+	char     comm[RPC_CLIENT_NAME_SIZE];
+	int64_t  alloc_mem;    /* hgsl-owned, non-protected */
+	int64_t  extern_mem;   /* externally imported/mapped, non-protected */
+	int64_t  prot_mem;     /* protected (alloc or extern) */
 };
 
 /* Resolve pid → process name (safe in both process and softirq context). */
@@ -163,7 +165,7 @@ static void _show_isyncs(struct seq_file *s, struct qcom_hgsl *hgsl)
 			found = 1;
 		}
 		hgsl_debugfs_printf(s,
-			"  %s: t_context=0x%llx, signaled_ts=%u, flags=0x%x, 64bit=%u\n",
+			"  %s: t_context=0x%llx, signaled_ts=%llu, flags=0x%x, 64bit=%u\n",
 			cur->name, cur->context, cur->last_ts,
 			cur->flags, cur->is64bits);
 	}
@@ -206,21 +208,14 @@ static int _collect_clients(struct qcom_hgsl *hgsl,
 
 	mutex_lock(&hgsl->mutex);
 	list_for_each_entry(priv, &hgsl->active_list, node) {
-		struct rb_node *rb;
-		int64_t mapped = 0;
-
 		if (npids >= max)
 			break;
-		clients[npids].pid      = priv->pid;
-		clients[npids].alloc_mem = atomic64_read(&priv->total_mem_size);
-		mutex_lock(&priv->lock);
-		for (rb = rb_first(&priv->mem_mapped); rb; rb = rb_next(rb)) {
-			struct hgsl_mem_node *mn =
-				rb_entry(rb, struct hgsl_mem_node, mem_rb_node);
-			mapped += mn->memdesc.size;
-		}
-		mutex_unlock(&priv->lock);
-		clients[npids].mapped_mem = mapped;
+		clients[npids].pid        = priv->pid;
+		strscpy(clients[npids].comm, priv->hyp_priv.client_name,
+			sizeof(clients[npids].comm));
+		clients[npids].alloc_mem  = atomic64_read(&priv->alloc_mem_size);
+		clients[npids].extern_mem = atomic64_read(&priv->extern_mem_size);
+		clients[npids].prot_mem   = atomic64_read(&priv->prot_mem_size);
 		npids++;
 	}
 	mutex_unlock(&hgsl->mutex);
@@ -250,14 +245,13 @@ static void _show_contexts(struct seq_file *s, struct qcom_hgsl *hgsl,
 		hgsl_debugfs_printf(s, "\nTotal (%d) active clients\n{\n",
 				    npids);
 		for (p = 0; p < npids; p++) {
-			char comm[TASK_COMM_LEN];
-
-			_get_comm(clients[p].pid, comm);
 			hgsl_debugfs_printf(s,
-				"\n  client-%d-[%s]: alloc=%lld KB, mapped=%lld KB\n",
-				clients[p].pid, comm,
+				"\n  client-%d-[%s]: total=%lldKB  alloc=%lldKB  extern=%lldKB  (protected=%lldKB)\n",
+				clients[p].pid, clients[p].comm,
+				(clients[p].alloc_mem + clients[p].extern_mem) >> 10,
 				clients[p].alloc_mem >> 10,
-				clients[p].mapped_mem >> 10);
+				clients[p].extern_mem >> 10,
+				clients[p].prot_mem >> 10);
 			for (dev_hnd = GSL_HANDLE_DEV0;
 			     dev_hnd < (HGSL_DEVICE_NUM + 1); dev_hnd++) {
 				for (i = 0; i < HGSL_CONTEXT_NUM; i++) {
@@ -304,8 +298,10 @@ static void _show_destroying_contexts(struct seq_file *s,
 
 	locked = atomic ? mutex_trylock(&hgsl->destroying_ctx_list_lock)
 			: (mutex_lock(&hgsl->destroying_ctx_list_lock), true);
-	if (!locked)
+	if (!locked) {
+		hgsl_debugfs_puts(s, "DESTROYING CONTEXTS: (skipped — lock busy)\n");
 		return;
+	}
 
 	list_for_each_entry(ctxt, &hgsl->destroying_ctx_list, node) {
 		if (!hgsl_context_get(ctxt))
@@ -317,9 +313,29 @@ static void _show_destroying_contexts(struct seq_file *s,
 		_ctxt_info_show(s, ctxt, atomic);
 		hgsl_put_context(ctxt);
 	}
+	mutex_unlock(&hgsl->destroying_ctx_list_lock);
+
 	if (!found)
 		hgsl_debugfs_puts(s, "DESTROYING CONTEXTS: null\n");
-	mutex_unlock(&hgsl->destroying_ctx_list_lock);
+}
+
+static void _show_mmu_state(struct seq_file *s, struct qcom_hgsl *hgsl)
+{
+	struct hgsl_iommu *iommu = &hgsl->mmu.iommu;
+	int i;
+
+	if (hgsl_mmu_get_mmutype(hgsl) == HGSL_MMU_TYPE_NONE)
+		return;
+
+	hgsl_debugfs_puts(s, "MMU:\n");
+	for (i = 0; i < HGSL_DEVICE_NUM; i++) {
+		struct hgsl_iommu_context *ctx = &iommu->user_context[i];
+
+		hgsl_debugfs_printf(s, "  dev%d: stalled=%s  pagetables=%d\n",
+				    i,
+				    ctx->stalled_on_fault ? "YES" : "no",
+				    atomic_read(&ctx->pagetables));
+	}
 }
 
 /*
@@ -332,15 +348,24 @@ static void _show_destroying_contexts(struct seq_file *s,
 static void _hgsl_stat_show(struct seq_file *s, struct qcom_hgsl *hgsl,
 			     bool atomic)
 {
-	hgsl_debugfs_printf(s, "DEVICE INFO:\n"
-		"{ default_iocoherency=%d, skip_cache_ops=%d, db_off=%d, total_mem_size=%lld; }\n",
-		hgsl->cache_flags.default_iocoherency, hgsl->cache_flags.skip_cache_ops,
-		hgsl->db_off, atomic64_read(&hgsl->total_mem_size));
+	s64 alloc = atomic64_read(&hgsl->alloc_mem_size);
+	s64 ext   = atomic64_read(&hgsl->extern_mem_size);
+	s64 prot  = atomic64_read(&hgsl->prot_mem_size);
 
+	hgsl_debugfs_printf(s, "DEVICE INFO:\n"
+		"{ chip_id=0x%x, fv_on=%d, use_single_pt=%d, db_off=%d,\n"
+		"  default_iocoherency=%d, skip_cache_ops=%d;\n"
+		"  mem: total=%lldKB  alloc=%lldKB  extern=%lldKB  (protected=%lldKB); }\n",
+		hgsl->chip_id, hgsl->fv_on, hgsl->use_single_pt, hgsl->db_off,
+		hgsl->cache_flags.default_iocoherency, hgsl->cache_flags.skip_cache_ops,
+		(alloc + ext) >> 10,
+		alloc >> 10, ext >> 10, prot >> 10);
+
+	_show_mmu_state(s, hgsl);
 	_show_isyncs(s, hgsl);
 	_show_waiting_contexts(s, hgsl);
-	_show_contexts(s, hgsl, atomic);
 	_show_destroying_contexts(s, hgsl, atomic);
+	_show_contexts(s, hgsl, atomic);
 }
 
 /*
@@ -385,396 +410,165 @@ static int hgsl_stat_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(hgsl_stat);
 
-static int hgsl_client_mem_show(struct seq_file *s, void *unused)
+/* Map GET_MEMTYPE(flags) index → human-readable name. */
+static const char *hgsl_memtype_name(unsigned int idx)
 {
-	struct hgsl_priv *priv = s->private;
-	struct hgsl_mem_node *tmp = NULL;
-	struct rb_node *rb = NULL;
-
-	mutex_lock(&priv->lock);
-	if (RB_EMPTY_ROOT(&priv->mem_allocated)) {
-		seq_printf(s, "No entries exist for allocated memory");
-		goto out;
-	}
-
-	seq_printf(s, "%16s %16s %10s %10s\n",
-				"gpuaddr", "size", "flags", "type");
-
-	for (rb = rb_first(&priv->mem_allocated); rb; rb = rb_next(rb)) {
-		tmp = rb_entry(rb, struct hgsl_mem_node, mem_rb_node);
-		seq_printf(s, "0x%llx 0x%16llx %10x %10d\n",
-		tmp->memdesc.gpuaddr,
-		tmp->memdesc.size,
-		tmp->flags,
-		tmp->memtype
-		);
-	}
-out:
-	mutex_unlock(&priv->lock);
-
-	return 0;
-}
-DEFINE_SHOW_ATTRIBUTE(hgsl_client_mem);
-
-static int hgsl_client_mem_mapped_show(struct seq_file *s, void *unused)
-{
-	struct hgsl_priv *priv = s->private;
-	struct hgsl_mem_node *tmp = NULL;
-	struct rb_node *rb = NULL;
-
-	mutex_lock(&priv->lock);
-	if (RB_EMPTY_ROOT(&priv->mem_mapped)) {
-		seq_printf(s, "No entries exist for mapped memory");
-		goto out;
-	}
-
-	seq_printf(s, "%16s %16s %10s %10s\n",
-				"gpuaddr", "size", "flags", "type");
-
-	for (rb = rb_first(&priv->mem_mapped); rb; rb = rb_next(rb)) {
-		tmp = rb_entry(rb, struct hgsl_mem_node, mem_rb_node);
-		seq_printf(s, "0x%llx %16llx %10x %10d\n",
-					tmp->memdesc.gpuaddr,
-					tmp->memdesc.size,
-					tmp->flags,
-					tmp->memtype
-					);
-	}
-out:
-	mutex_unlock(&priv->lock);
-
-	return 0;
-}
-DEFINE_SHOW_ATTRIBUTE(hgsl_client_mem_mapped);
-
-static int hgsl_client_memtype_show(struct seq_file *s, void *unused)
-{
-	struct hgsl_priv *priv = s->private;
-	struct hgsl_mem_node *tmp = NULL;
-	struct rb_node *rb = NULL;
-	int i;
-	int memtype;
-
-	static struct {
-		char *name;
-		size_t size;
-	} gpu_mem_types[] = {
-		{"any", 0},
-		{"framebuffer", 0},
-		{"renderbbuffer", 0},
-		{"arraybuffer", 0},
-		{"elementarraybuffer", 0},
-		{"vertexarraybuffer", 0},
-		{"texture", 0},
-		{"surface", 0},
-		{"eglsurface", 0},
-		{"gl", 0},
-		{"cl", 0},
-		{"cl_buffer_map", 0},
-		{"cl_buffer_unmap", 0},
-		{"cl_image_map", 0},
-		{"cl_image_unmap", 0},
-		{"cl_kernel_stack", 0},
-		{"cmds", 0},
-		{"2d", 0},
-		{"egl_image", 0},
-		{"egl_shadow", 0},
-		{"multisample", 0},
-		{"2d_ext", 0},
-		{"3d_ext", 0}, /* 0x16 */
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"vk_any", 0}, /* 0x20 */
-		{"vk_instance", 0},
-		{"vk_physicaldevice", 0},
-		{"vk_device", 0},
-		{"vk_queue", 0},
-		{"vk_cmdbuffer", 0},
-		{"vk_devicememory", 0},
-		{"vk_buffer", 0},
-		{"vk_bufferview", 0},
-		{"vk_image", 0},
-		{"vk_imageview", 0},
-		{"vk_shadermodule", 0},
-		{"vk_pipeline", 0},
-		{"vk_pipelinecache", 0},
-		{"vk_pipelinelayout", 0},
-		{"vk_sampler", 0},
-		{"vk_samplerycbcrconversionkhr", 0}, /* 0x30 */
-		{"vk_descriptorset", 0},
-		{"vk_descriptorsetlayout", 0},
-		{"vk_descriptorpool", 0},
-		{"vk_fence", 0},
-		{"vk_semaphore", 0},
-		{"vk_event", 0},
-		{"vk_querypool", 0},
-		{"vk_framebuffer", 0},
-		{"vk_renderpass", 0},
-		{"vk_program", 0},
-		{"vk_commandpool", 0},
-		{"vk_surfacekhr", 0},
-		{"vk_swapchainkhr", 0},
-		{"vk_descriptorupdatetemplate", 0},
-		{"vk_deferredoperationkhr", 0},
-		{"vk_privatedataslotext", 0}, /* 0x40 */
-		{"vk_debug_utils", 0},
-		{"vk_tensor", 0},
-		{"vk_tensorview", 0},
-		{"vk_mlpipeline", 0},
-		{"vk_acceleration_structure", 0},
+	static const char * const names[] = {
+		"any",                       /* 0x00 */
+		"framebuffer",               /* 0x01 */
+		"renderbuffer",              /* 0x02 */
+		"arraybuffer",               /* 0x03 */
+		"elementarraybuffer",        /* 0x04 */
+		"vertexarraybuffer",         /* 0x05 */
+		"texture",                   /* 0x06 */
+		"surface",                   /* 0x07 */
+		"eglsurface",                /* 0x08 */
+		"gl",                        /* 0x09 */
+		"cl",                        /* 0x0a */
+		"cl_buffer_map",             /* 0x0b */
+		"cl_buffer_unmap",           /* 0x0c */
+		"cl_image_map",              /* 0x0d */
+		"cl_image_unmap",            /* 0x0e */
+		"cl_kernel_stack",           /* 0x0f */
+		"cmds",                      /* 0x10 */
+		"2d",                        /* 0x11 */
+		"egl_image",                 /* 0x12 */
+		"egl_shadow",                /* 0x13 */
+		"multisample",               /* 0x14 */
+		"2d_ext",                    /* 0x15 */
+		"3d_ext",                    /* 0x16 */
+		"unknown", "unknown", "unknown", "unknown", "unknown",
+		"unknown", "unknown", "unknown", "unknown",          /* 0x17-0x1f */
+		"vk_any",                    /* 0x20 */
+		"vk_instance",               /* 0x21 */
+		"vk_physicaldevice",         /* 0x22 */
+		"vk_device",                 /* 0x23 */
+		"vk_queue",                  /* 0x24 */
+		"vk_cmdbuffer",              /* 0x25 */
+		"vk_devicememory",           /* 0x26 */
+		"vk_buffer",                 /* 0x27 */
+		"vk_bufferview",             /* 0x28 */
+		"vk_image",                  /* 0x29 */
+		"vk_imageview",              /* 0x2a */
+		"vk_shadermodule",           /* 0x2b */
+		"vk_pipeline",               /* 0x2c */
+		"vk_pipelinecache",          /* 0x2d */
+		"vk_pipelinelayout",         /* 0x2e */
+		"vk_sampler",                /* 0x2f */
+		"vk_samplerycbcrconversionkhr", /* 0x30 */
+		"vk_descriptorset",          /* 0x31 */
+		"vk_descriptorsetlayout",    /* 0x32 */
+		"vk_descriptorpool",         /* 0x33 */
+		"vk_fence",                  /* 0x34 */
+		"vk_semaphore",              /* 0x35 */
+		"vk_event",                  /* 0x36 */
+		"vk_querypool",              /* 0x37 */
+		"vk_framebuffer",            /* 0x38 */
+		"vk_renderpass",             /* 0x39 */
+		"vk_program",                /* 0x3a */
+		"vk_commandpool",            /* 0x3b */
+		"vk_surfacekhr",             /* 0x3c */
+		"vk_swapchainkhr",           /* 0x3d */
+		"vk_descriptorupdatetemplate", /* 0x3e */
+		"vk_deferredoperationkhr",   /* 0x3f */
+		"vk_privatedataslotext",     /* 0x40 */
+		"vk_debug_utils",            /* 0x41 */
+		"vk_tensor",                 /* 0x42 */
+		"vk_tensorview",             /* 0x43 */
+		"vk_mlpipeline",             /* 0x44 */
+		"vk_acceleration_structure", /* 0x45 */
 	};
 
-	for (i = 0; i < ARRAY_SIZE(gpu_mem_types); i++)
-		gpu_mem_types[i].size = 0;
+	if (idx < ARRAY_SIZE(names))
+		return names[idx];
+	return "unknown";
+}
+
+/* Print per-buffer table for one rb-tree, with a separate protected section. */
+static void _show_mem_pool(struct seq_file *s, struct rb_root *root,
+			   const char *label)
+{
+	struct rb_node *rb;
+	struct hgsl_mem_node *mn;
+	bool header_printed = false;
+
+	for (rb = rb_first(root); rb; rb = rb_next(rb)) {
+		mn = rb_entry(rb, struct hgsl_mem_node, mem_rb_node);
+		if (!header_printed) {
+			hgsl_debugfs_printf(s, "  %s:\n", label);
+			hgsl_debugfs_printf(s, "  %-18s %12s  %-10s %-24s\n",
+					    "iova", "size", "flags", "memtype");
+			header_printed = true;
+		}
+		hgsl_debugfs_printf(s, "  0x%016llx 0x%010llx  0x%08x %-24s%s\n",
+				    mn->memdesc.gpuaddr,
+				    mn->memdesc.size64,
+				    mn->flags,
+				    hgsl_memtype_name(GET_MEMTYPE(mn->flags)),
+				    (mn->flags & GSL_MEMFLAGS_PROTECTED) ? " [P]" : "");
+	}
+}
+
+static void _show_client_mem(struct seq_file *s, struct hgsl_priv *priv)
+{
+	hgsl_debugfs_printf(s, "client-%d-[%s]\n",
+			    priv->pid, priv->hyp_priv.client_name);
 
 	mutex_lock(&priv->lock);
-	for (rb = rb_first(&priv->mem_allocated); rb; rb = rb_next(rb)) {
-		tmp = rb_entry(rb, struct hgsl_mem_node, mem_rb_node);
-		memtype = GET_MEMTYPE(tmp->flags);
-		if (memtype < ARRAY_SIZE(gpu_mem_types))
-			gpu_mem_types[memtype].size += tmp->memdesc.size;
-	}
+	_show_mem_pool(s, &priv->mem_allocated, "allocated");
+	_show_mem_pool(s, &priv->mem_mapped,    "extern/mapped");
 	mutex_unlock(&priv->lock);
-
-	seq_printf(s, "%16s %16s\n", "type", "size");
-	for (i = 0; i < ARRAY_SIZE(gpu_mem_types); i++) {
-		if (gpu_mem_types[i].size != 0)
-			seq_printf(s, "%16s %16d\n",
-				gpu_mem_types[i].name,
-				gpu_mem_types[i].size);
 }
 
-
-	return 0;
-}
-DEFINE_SHOW_ATTRIBUTE(hgsl_client_memtype);
-
-static int hgsl_client_mem_mapped_type_show(struct seq_file *s, void *unused)
-{
-	struct hgsl_priv *priv = s->private;
-	struct hgsl_mem_node *tmp = NULL;
-	struct rb_node *rb = NULL;
-	int i;
-	int memtype;
-
-	static struct {
-			char *name;
-			size_t size;
-	} gpu_mem_types[] = {
-		{"any", 0},
-		{"framebuffer", 0},
-		{"renderbbuffer", 0},
-		{"arraybuffer", 0},
-		{"elementarraybuffer", 0},
-		{"vertexarraybuffer", 0},
-		{"texture", 0},
-		{"surface", 0},
-		{"eglsurface", 0},
-		{"gl", 0},
-		{"cl", 0},
-		{"cl_buffer_map", 0},
-		{"cl_buffer_unmap", 0},
-		{"cl_image_map", 0},
-		{"cl_image_unmap", 0},
-		{"cl_kernel_stack", 0},
-		{"cmds", 0},
-		{"2d", 0},
-		{"egl_image", 0},
-		{"egl_shadow", 0},
-		{"multisample", 0},
-		{"2d_ext", 0},
-		{"3d_ext", 0}, /* 0x16 */
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"unknown_type", 0},
-		{"vk_any", 0}, /* 0x20 */
-		{"vk_instance", 0},
-		{"vk_physicaldevice", 0},
-		{"vk_device", 0},
-		{"vk_queue", 0},
-		{"vk_cmdbuffer", 0},
-		{"vk_devicememory", 0},
-		{"vk_buffer", 0},
-		{"vk_bufferview", 0},
-		{"vk_image", 0},
-		{"vk_imageview", 0},
-		{"vk_shadermodule", 0},
-		{"vk_pipeline", 0},
-		{"vk_pipelinecache", 0},
-		{"vk_pipelinelayout", 0},
-		{"vk_sampler", 0},
-		{"vk_samplerycbcrconversionkhr", 0}, /* 0x30 */
-		{"vk_descriptorset", 0},
-		{"vk_descriptorsetlayout", 0},
-		{"vk_descriptorpool", 0},
-		{"vk_fence", 0},
-		{"vk_semaphore", 0},
-		{"vk_event", 0},
-		{"vk_querypool", 0},
-		{"vk_framebuffer", 0},
-		{"vk_renderpass", 0},
-		{"vk_program", 0},
-		{"vk_commandpool", 0},
-		{"vk_surfacekhr", 0},
-		{"vk_swapchainkhr", 0},
-		{"vk_descriptorupdatetemplate", 0},
-		{"vk_deferredoperationkhr", 0},
-		{"vk_privatedataslotext", 0}, /* 0x40 */
-		{"vk_debug_utils", 0},
-		{"vk_tensor", 0},
-		{"vk_tensorview", 0},
-		{"vk_mlpipeline", 0},
-		{"vk_acceleration_structure", 0},
-	};
-
-	for (i = 0; i < ARRAY_SIZE(gpu_mem_types); i++)
-		gpu_mem_types[i].size = 0;
-
-	mutex_lock(&priv->lock);
-	for (rb = rb_first(&priv->mem_mapped); rb; rb = rb_next(rb)) {
-		tmp = rb_entry(rb, struct hgsl_mem_node, mem_rb_node);
-		memtype = GET_MEMTYPE(tmp->flags);
-		if (memtype < ARRAY_SIZE(gpu_mem_types))
-			gpu_mem_types[memtype].size += tmp->memdesc.size;
-	}
-	mutex_unlock(&priv->lock);
-
-	seq_printf(s, "%16s %16s\n", "type", "size");
-	for (i = 0; i < ARRAY_SIZE(gpu_mem_types); i++) {
-		if (gpu_mem_types[i].size != 0)
-			seq_printf(s, "%16s %16d\n",
-				gpu_mem_types[i].name,
-				gpu_mem_types[i].size);
-	}
-
-	return 0;
-}
-DEFINE_SHOW_ATTRIBUTE(hgsl_client_mem_mapped_type);
-
-int hgsl_debugfs_client_init(struct hgsl_priv *priv)
-{
-	struct qcom_hgsl *hgsl = priv->dev;
-	unsigned char name[16];
-	struct dentry *ret;
-
-	snprintf(name, sizeof(name), "%d", priv->pid);
-	ret = debugfs_create_dir(name,
-				hgsl->clients_debugfs);
-	if (IS_ERR_OR_NULL(ret)) {
-		LOGW("Create debugfs proc node failed.");
-		priv->debugfs_client = NULL;
-		return ret ? PTR_ERR(ret) : -EINVAL;
-	} else
-		priv->debugfs_client = ret;
-
-	priv->debugfs_mem = debugfs_create_file("mem", 0444,
-			priv->debugfs_client,
-			priv,
-			&hgsl_client_mem_fops);
-
-	priv->debugfs_memtype = debugfs_create_file("obj_types", 0444,
-			priv->debugfs_client,
-			priv,
-			&hgsl_client_memtype_fops);
-
-	priv->debugfs_mem_mapped = debugfs_create_file("mem_mapped", 0444,
-					priv->debugfs_client,
-					priv,
-					&hgsl_client_mem_mapped_fops);
-
-	priv->debugfs_mem_mapped_type = debugfs_create_file("mem_mapped_obj_types", 0444,
-					priv->debugfs_client,
-					priv,
-					&hgsl_client_mem_mapped_type_fops);
-
-	return 0;
-}
-
-void hgsl_debugfs_client_release(struct hgsl_priv *priv)
-{
-	debugfs_remove_recursive(priv->debugfs_client);
-}
-
-static void events_debugfs_print_group(struct seq_file *s,
-		struct hgsl_event_group *group)
-{
-	struct hgsl_event *event;
-	struct hgsl_context *ctxt = container_of(group,
-		struct hgsl_context, event_group);
-	u32 retired;
-
-	if (WARN_ON(!hgsl_context_get(ctxt)))
-		return;
-
-	/* Sanity check if the group is inintalized */
-	if (WARN_ON(ctxt != group->context)) {
-		hgsl_put_context(ctxt);
-		return;
-	}
-
-	/*
-	 * Read the retired timestamp before taking the spinlock.
-	 * group->readtimestamp is hgsl_read_timestamp(), which may fall
-	 * back to a hyp IPC call that can sleep, so it must not be
-	 * called while holding the spinlock.
-	 */
-	if (group->readtimestamp(ctxt, GSL_TIMESTAMP_RETIRED, &retired))
-		retired = group->processed;
-
-	spin_lock(&group->lock);
-	seq_printf(s, "%s: last=%d\n", group->name,
-		group->processed);
-	list_for_each_entry(event, &group->events, node) {
-		seq_printf(s, "\t%u:%u age=%lums func=%ps [retired=%u]\n",
-			ctxt->context_id, event->timestamp,
-			jiffies_to_msecs(get_jiffies_64() - event->created),
-			event->func, retired);
-	}
-	spin_unlock(&group->lock);
-	hgsl_put_context(ctxt);
-}
-
-static int events_show(struct seq_file *s, void *unused)
+static int hgsl_mem_info_show(struct seq_file *s, void *unused)
 {
 	struct qcom_hgsl *hgsl = s->private;
-	struct hgsl_event_group *group;
+	struct hgsl_priv *priv;
+	s64 total_alloc = 0, total_ext = 0, total_prot = 0;
 
-	seq_puts(s, "event groups:\n");
-	seq_puts(s, "--------------\n");
+	mutex_lock(&hgsl->mutex);
 
-	read_lock(&hgsl->event_groups_lock);
-	list_for_each_entry(group, &hgsl->event_groups, node) {
-		events_debugfs_print_group(s, group);
-		seq_puts(s, "\n");
+	hgsl_debugfs_puts(s, "SUMMARY:\n");
+	list_for_each_entry(priv, &hgsl->active_list, node) {
+		s64 alloc = atomic64_read(&priv->alloc_mem_size);
+		s64 ext   = atomic64_read(&priv->extern_mem_size);
+		s64 prot  = atomic64_read(&priv->prot_mem_size);
+		int dev;
+
+		hgsl_debugfs_printf(s, "  client-%d-[%s]:\n    total=%lldKB  alloc=%lldKB  extern=%lldKB  (protected=%lldKB)\n",
+			   priv->pid, priv->hyp_priv.client_name,
+			   (alloc + ext) >> 10,
+			   alloc >> 10, ext >> 10, prot >> 10);
+		for (dev = 0; dev < HGSL_DEVICE_NUM; dev++) {
+			struct hgsl_pagetable *pt = priv->pagetable[dev];
+
+			if (!pt)
+				continue;
+			hgsl_debugfs_printf(s,
+				   "    pagetable[dev%d]: entries=%d  mapped=%ldKB  peak=%ldKB  fault=0x%016llx\n",
+				   dev,
+				   atomic_read(&pt->stats.entries),
+				   atomic_long_read(&pt->stats.mapped) >> 10,
+				   atomic_long_read(&pt->stats.max_mapped) >> 10,
+				   pt->fault_addr);
+		}
+		total_alloc += alloc;
+		total_ext   += ext;
+		total_prot  += prot;
 	}
-	read_unlock(&hgsl->event_groups_lock);
+	hgsl_debugfs_printf(s, "  TOTAL: total=%lldKB  alloc=%lldKB  extern=%lldKB  (protected=%lldKB)\n\n",
+		   (total_alloc + total_ext) >> 10,
+		   total_alloc >> 10, total_ext >> 10, total_prot >> 10);
 
+	list_for_each_entry(priv, &hgsl->active_list, node) {
+		_show_client_mem(s, priv);
+		hgsl_debugfs_puts(s, "\n");
+	}
+
+	mutex_unlock(&hgsl->mutex);
 	return 0;
 }
-DEFINE_SHOW_ATTRIBUTE(events);
-
-void hgsl_debugfs_events_init(struct qcom_hgsl *hgsl)
-{
-	struct dentry *dentry;
-
-	dentry = debugfs_create_file("events", 0444, hgsl->debugfs,
-		hgsl, &events_fops);
-	if (IS_ERR_OR_NULL(dentry))
-		LOGW("Unable to create debugfs for events");
-}
+DEFINE_SHOW_ATTRIBUTE(hgsl_mem_info);
 
 void hgsl_debugfs_init(struct platform_device *pdev)
 {
@@ -786,22 +580,16 @@ void hgsl_debugfs_init(struct platform_device *pdev)
 		LOGW("Unable to create debugfs dir for hgsl");
 		return;
 	}
-	hgsl->clients_debugfs = debugfs_create_dir("clients", root);
-	if (IS_ERR_OR_NULL(hgsl->clients_debugfs)) {
-		LOGW("Unable to create debugfs dir for clients");
-		hgsl->clients_debugfs = NULL;
-		return;
-	}
 
-	hgsl->debugfs_stat = debugfs_create_file("stat", 0444,
-		root, hgsl, &hgsl_stat_fops);
-	if (IS_ERR_OR_NULL(hgsl->debugfs_stat)) {
-		LOGW("Unable to create debugfs state");
-		hgsl->debugfs_stat = NULL;
-	}
+	if (IS_ERR_OR_NULL(debugfs_create_file("stat", 0444,
+					       root, hgsl, &hgsl_stat_fops)))
+		LOGW("Unable to create debugfs stat");
+
+	if (IS_ERR_OR_NULL(debugfs_create_file("mem_info", 0444,
+					       root, hgsl, &hgsl_mem_info_fops)))
+		LOGW("Unable to create debugfs mem_info");
 
 	hgsl->debugfs = root;
-	hgsl_debugfs_events_init(hgsl);
 }
 
 void hgsl_debugfs_release(struct platform_device *pdev)
