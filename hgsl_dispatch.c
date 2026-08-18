@@ -4,7 +4,7 @@
  */
 
 #include "hgsl.h"
-#include "hgsl_debugfs.h"
+#include "hgsl_stat.h"
 #include "hgsl_dispatch.h"
 #include "hgsl_trace.h"
 
@@ -100,7 +100,7 @@ static void _warn_duplicate_ts(struct hgsl_priv *priv,
 		     drawobj_type_str(obj->type), obj->timestamp,
 		     (obj->type & CMDOBJ_TYPE) ? CMDOBJ(obj)->numibs : 0);
 	}
-	hgsl_debugfs_dump_ctxts(&ctxt, 1, priv->dev, false);
+	hgsl_stat_dump_ctxts(&ctxt, 1, priv->dev, false);
 }
 
 static bool _check_context_queue(struct hgsl_context *ctxt, u32 count)
@@ -655,7 +655,7 @@ static void _warn_reclaim_pending(struct hgsl_context *ctxt)
 	     ctxt->context_id, ctxt->queued_ts,
 	     ctxt->event_group.processed,
 	     get_context_retired_ts(ctxt));
-	hgsl_debugfs_dump_ctxts(&ctxt, 1, dispatch->hgsl, false);
+	hgsl_stat_dump_ctxts(&ctxt, 1, dispatch->hgsl, false);
 }
 
 void hgsl_reclaim_drawobjs(struct hgsl_context *ctxt)

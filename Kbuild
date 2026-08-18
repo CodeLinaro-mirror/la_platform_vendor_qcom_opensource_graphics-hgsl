@@ -39,6 +39,7 @@ ccflags-y += -I$(HGSL_PATH)  \
 obj-$(CONFIG_QCOM_HGSL) += qcom_hgsl.o
 
 qcom_hgsl-y = hgsl.o \
+            hgsl_stat.o \
             hgsl_gmugos.o \
             hgsl_hyp.o \
             hgsl_hyp_socket.o \
