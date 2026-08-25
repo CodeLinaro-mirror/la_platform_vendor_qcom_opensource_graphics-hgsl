@@ -401,7 +401,7 @@ static void hgsl_reg_write(struct reg *reg, unsigned int off,
 		return;
 
 	if (WARN(off > reg->size,
-		"Invalid reg write:0x%x, reg size:0x%x\n",
+		"Invalid reg write:0x%x, reg size:0x%lx\n",
 						off, reg->size))
 		return;
 
@@ -5538,7 +5538,8 @@ exit_dereg:
 	return ret;
 }
 
-static int qcom_hgsl_remove(struct platform_device *pdev)
+
+static DRV_REMOVE_RET qcom_hgsl_remove(struct platform_device *pdev)
 {
 	struct qcom_hgsl *hgsl = platform_get_drvdata(pdev);
 	struct hgsl_tcsr *tcsr_sender, *tcsr_receiver;
@@ -5604,7 +5605,7 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 	qcom_hgsl_deregister(pdev);
 
 out:
-	return 0;
+	DRV_REMOVE_RETURN(0);
 }
 
 static const struct dev_pm_ops hgsl_pm_ops = {
