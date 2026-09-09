@@ -800,6 +800,7 @@ int hgsl_db_next_timestamp(struct hgsl_context *ctxt,
 	if (timestamp == NULL) {
 		LOGE("invalid timestamp");
 		ret = -EINVAL;
+		goto out;
 	} else if ((ctxt->flags & GSL_CONTEXT_FLAG_USER_GENERATED_TS) == 0)
 		LOGI("user generated ts, ctx:%d next client ts %u current ts %u",
 				ctxt->context_id, *timestamp, ctxt->queued_ts);
@@ -820,6 +821,7 @@ int hgsl_db_next_timestamp(struct hgsl_context *ctxt,
 	}
 
 	trace_next_timestamp(ctxt, *timestamp, ret);
+out:
 	return ret;
 }
 
