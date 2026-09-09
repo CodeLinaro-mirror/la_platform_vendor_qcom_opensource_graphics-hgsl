@@ -1675,7 +1675,7 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 	/* Retry to communicate with BE here first do gsl_lib_open*/
 	do {
 		ret_val = hgsl_hyp_lib_open(&hgsl->global_hyp, 0, &rval);
-	} while (ret_val == -EAGAIN && retry_count--);
+	} while (ret_val != 0 && retry_count--);
 
 	if (ret_val || rval) {
 		LOGE("hgsl_hyp_lib_open() failed with ret_val %d rval %d retry_count %u",
