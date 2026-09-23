@@ -30,6 +30,7 @@
 #include "hgsl_memory.h"
 #include "hgsl_sysfs.h"
 #include "hgsl_debugfs.h"
+#include "hgsl_stat.h"
 #include "hgsl_dispatch.h"
 #include "hgsl_drawobj.h"
 
@@ -667,7 +668,7 @@ quit:
 	/* let user try again incase we miss to submit */
 	if (-ETIMEDOUT == ret) {
 		LOGE("Timed out to send db msg, try again\n");
-		hgsl_debugfs_dump_ctxts(&ctxt, 1, hgsl, false);
+		hgsl_stat_dump_ctxts(&ctxt, 1, hgsl, false);
 		ret = -EAGAIN;
 	}
 	return ret;
@@ -5392,6 +5393,7 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&hgsl_dev->active_wait_list);
 	INIT_LIST_HEAD(&hgsl_dev->destroying_ctx_list);
 	mutex_init(&hgsl_dev->destroying_ctx_list_lock);
+	mutex_init(&hgsl_dev->stat.lock);
 	spin_lock_init(&hgsl_dev->active_wait_lock);
 
 	ret = hgsl_init_release_wq(hgsl_dev);
