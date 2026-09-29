@@ -15,6 +15,12 @@
 #include <linux/regmap.h>
 #include <linux/version.h>
 
+#include "hgsl_git_version.h"
+
+#ifndef HGSL_GIT_HASH
+#define HGSL_GIT_HASH "unknown"
+#endif
+
 #if KERNEL_VERSION(6, 10, 0) > LINUX_VERSION_CODE
 #define DRV_REMOVE_RET         int
 #define DRV_REMOVE_RETURN(val) return (val)
@@ -134,15 +140,18 @@ static inline void hgsl_log(unsigned int level, const char * const fun,
 	}
 
 	if (task)
-		snprintf(buffer, sizeof(buffer), "HGSL [%s] [%s:%u] [%s:%u:%u]",
-			tag, fun, line, task->comm, task_pid_nr(task), current->pid);
+		snprintf(buffer, sizeof(buffer), "HGSL [%s] [%s] [%s:%u] [%s:%u:%u]",
+			HGSL_GIT_HASH, tag, fun, line, task->comm,
+			task_pid_nr(task), current->pid);
 	else
-		snprintf(buffer, sizeof(buffer), "HGSL [%s] [%s:%u]",
-			tag, fun, line);
+		snprintf(buffer, sizeof(buffer), "HGSL [%s] [%s] [%s:%u]",
+			HGSL_GIT_HASH, tag, fun, line);
 
 	offset = strlen(buffer);
 	va_start(arglist, format);
-	vsnprintf(buffer + offset, sizeof(buffer) - offset, format, arglist);
+	if (vsnprintf(buffer + offset, sizeof(buffer) - offset, format, arglist) >=
+			(int)(sizeof(buffer) - offset))
+		pr_warn("HGSL: log message truncated\n");
 	va_end(arglist);
 
 	pr_err("%s\n", buffer);
