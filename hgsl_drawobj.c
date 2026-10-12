@@ -9,7 +9,7 @@
 #include "hgsl.h"
 #include "hgsl_drawobj.h"
 #include "hgsl_dispatch.h"
-#include "hgsl_debugfs.h"
+#include "hgsl_stat.h"
 #include "hgsl_trace.h"
 
 /*
@@ -197,7 +197,7 @@ static void syncobj_timer(struct timer_list *t)
 		dump_ctxts[ndump++] = ctxt;
 
 	/* Dump all collected contexts + waiting + destroying contexts */
-	hgsl_debugfs_dump_ctxts(dump_ctxts, ndump, ctxt->priv->dev, true);
+	hgsl_stat_dump_ctxts(dump_ctxts, ndump, ctxt->priv->dev, true);
 
 	hgsl_drawobj_put(drawobj);
 	LOGE("--gpu syncpoint deadlock print end--\n");

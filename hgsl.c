@@ -30,6 +30,7 @@
 #include "hgsl_memory.h"
 #include "hgsl_sysfs.h"
 #include "hgsl_debugfs.h"
+#include "hgsl_stat.h"
 #include "hgsl_dispatch.h"
 #include "hgsl_drawobj.h"
 
@@ -667,7 +668,7 @@ quit:
 	/* let user try again incase we miss to submit */
 	if (-ETIMEDOUT == ret) {
 		LOGE("Timed out to send db msg, try again\n");
-		hgsl_debugfs_dump_ctxts(&ctxt, 1, hgsl, false);
+		hgsl_stat_dump_ctxts(&ctxt, 1, hgsl, false);
 		ret = -EAGAIN;
 	}
 	return ret;
@@ -800,6 +801,7 @@ int hgsl_db_next_timestamp(struct hgsl_context *ctxt,
 	if (timestamp == NULL) {
 		LOGE("invalid timestamp");
 		ret = -EINVAL;
+		goto out;
 	} else if ((ctxt->flags & GSL_CONTEXT_FLAG_USER_GENERATED_TS) == 0)
 		LOGI("user generated ts, ctx:%d next client ts %u current ts %u",
 				ctxt->context_id, *timestamp, ctxt->queued_ts);
@@ -820,6 +822,7 @@ int hgsl_db_next_timestamp(struct hgsl_context *ctxt,
 	}
 
 	trace_next_timestamp(ctxt, *timestamp, ret);
+out:
 	return ret;
 }
 
@@ -1675,7 +1678,7 @@ static int hgsl_init_global_hyp_channel(struct qcom_hgsl *hgsl)
 	/* Retry to communicate with BE here first do gsl_lib_open*/
 	do {
 		ret_val = hgsl_hyp_lib_open(&hgsl->global_hyp, 0, &rval);
-	} while (ret_val == -EAGAIN && retry_count--);
+	} while (ret_val != 0 && retry_count--);
 
 	if (ret_val || rval) {
 		LOGE("hgsl_hyp_lib_open() failed with ret_val %d rval %d retry_count %u",
@@ -5390,6 +5393,7 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&hgsl_dev->active_wait_list);
 	INIT_LIST_HEAD(&hgsl_dev->destroying_ctx_list);
 	mutex_init(&hgsl_dev->destroying_ctx_list_lock);
+	mutex_init(&hgsl_dev->stat.lock);
 	spin_lock_init(&hgsl_dev->active_wait_lock);
 
 	ret = hgsl_init_release_wq(hgsl_dev);
