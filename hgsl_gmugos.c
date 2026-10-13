@@ -51,8 +51,14 @@ static void hgsl_snapshot_dump(struct qcom_hgsl *hgsl_dev, uint32_t *msg_buffer,
 	struct hgsl_snapshot_info_t snapshot_info = {0};
 	uint32_t buf_size = 0;
 	uint32_t used_size = 0;
-	enum gsl_devhandle_t devhandle = hgsl_dev->device_handle[dev_id];
+	enum gsl_devhandle_t devhandle = GSL_HANDLE_NULL;
 	struct HfiMsgHeader_t *msg_header = (struct HfiMsgHeader_t *)msg_buffer;
+
+	if (dev_id >= HGSL_DEVICE_NUM) {
+		LOGE("Invalid dev handle %u\n", dev_hnd);
+		return;
+	}
+	devhandle = hgsl_dev->device_handle[dev_id];
 
 	if (msg_header->msg_size_dword * sizeof(uint32_t) !=
 		sizeof(struct hgsl_ipcq_gvm_state_dump_msg)) {
@@ -307,6 +313,10 @@ static void hgsl_gmugos_handle_ipcq_msg(struct work_struct *work)
 
 	// this dev_id is different from the gsl_deviceid_t
 	dev_id = hgsl_hnd2id(gmugos->dev_hnd);
+	if (dev_id >= HGSL_DEVICE_NUM) {
+		LOGE("Invalid dev handle %u\n", gmugos->dev_hnd);
+		goto exit;
+	}
 	hgsl_dev = (struct qcom_hgsl *)container_of
 		(gmugos, typeof(struct qcom_hgsl), gmugos[dev_id]);
 	if (!hgsl_dev) {

@@ -212,7 +212,7 @@ DECLARE_EVENT_CLASS(hgsl_drawobj_class,
 		__entry->type = drawobj->type;
 		__entry->timestamp = drawobj->timestamp;
 	),
-	TP_printk("ctx=[%u:%u] drawq[%u-%u] refcount=%u timestamp=%u",
+	TP_printk("ctx=[%u:%u] drawq[%u-%u] refcount=%u type=%u timestamp=%u",
 		__entry->devhandle, __entry->context_id, __entry->drawq_head,
 		__entry->drawq_tail, __entry->refcount, __entry->type,
         __entry->timestamp)
@@ -256,7 +256,7 @@ DECLARE_EVENT_CLASS(hgsl_syncobj_class,
 		__entry->syncobj = (uintptr_t)syncobj;
 		__assign_str(fence_names);
 	),
-	TP_printk("ctx=[%u:%u] drawq[%u-%u] refcount=%u numsyncs=%u syncobj=0x%llx fence_names=%s",
+	TP_printk("ctx=[%u:%u] drawq[%u-%u] refcount=%u numsyncs=%u syncobj=0x%lx fence_names=%s",
 		__entry->devhandle, __entry->context_id, __entry->drawq_head,
 		__entry->drawq_tail, __entry->refcount, __entry->numsyncs,
 		__entry->syncobj, __get_str(fence_names))
@@ -326,7 +326,7 @@ DECLARE_EVENT_CLASS(syncpoint_fence_class,
 		__entry->syncobj = (uintptr_t)syncobj;
 		__assign_str(fence_name);
 	),
-	TP_printk("ctx=[%u:%u] syncobj=0x%llx fence=%s",
+	TP_printk("ctx=[%u:%u] syncobj=0x%lx fence=%s",
 		__entry->syncobj_devhandle, __entry->syncobj_context_id,
 		__entry->syncobj, __get_str(fence_name))
 );
@@ -358,7 +358,7 @@ DECLARE_EVENT_CLASS(event_class,
 		__entry->created = event->created;
 		__entry->result = event->result;
 	),
-	TP_printk("ctx=[%u:%u] ts=%u age=%lums result=%d",
+	TP_printk("ctx=[%u:%u] ts=%u age=%ums result=%d",
 		__entry->devhandle, __entry->context_id, __entry->timestamp,
 		jiffies_to_msecs(get_jiffies_64() - __entry->created),
 		__entry->result)
