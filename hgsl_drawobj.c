@@ -9,7 +9,7 @@
 #include "hgsl.h"
 #include "hgsl_drawobj.h"
 #include "hgsl_dispatch.h"
-#include "hgsl_debugfs.h"
+#include "hgsl_stat.h"
 #include "hgsl_trace.h"
 
 /*
@@ -197,7 +197,7 @@ static void syncobj_timer(struct timer_list *t)
 		dump_ctxts[ndump++] = ctxt;
 
 	/* Dump all collected contexts + waiting + destroying contexts */
-	hgsl_debugfs_dump_ctxts(dump_ctxts, ndump, ctxt->priv->dev, true);
+	hgsl_stat_dump_ctxts(dump_ctxts, ndump, ctxt->priv->dev, true);
 
 	hgsl_drawobj_put(drawobj);
 	LOGE("--gpu syncpoint deadlock print end--\n");
@@ -318,6 +318,10 @@ void hgsl_ctxt_detach_drawobjs(struct qcom_hgsl *hgsl,
 
 		list[count++] = drawobj;
 	}
+	/* The loop above advances drawq_head without calling _pop_drawobj,
+	 * so ctxt->queued is not decremented.  Reset it here.
+	 */
+	ctxt->queued = 0;
 	rt_mutex_unlock(&ctxt->drawq_lock);
 
 	for (i = 0; i < count; i++) {

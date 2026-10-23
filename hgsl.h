@@ -235,6 +235,48 @@ struct hgsl_event_group {
 	void *priv;
 };
 
+/**
+ * enum hgsl_stat_scope - selects which contexts a stat query covers
+ * @HGSL_STAT_SCOPE_ALL: every context (no filtering)
+ * @HGSL_STAT_SCOPE_PID: only contexts owned by the query's @pid
+ * @HGSL_STAT_SCOPE_CONTEXT: only the exact (@devhandle, @context_id) context
+ */
+enum hgsl_stat_scope {
+	HGSL_STAT_SCOPE_ALL,
+	HGSL_STAT_SCOPE_PID,
+	HGSL_STAT_SCOPE_CONTEXT,
+};
+
+/**
+ * struct hgsl_stat_query - a complete "stat" dump request
+ * @scope: which contexts to include, per &enum hgsl_stat_scope
+ * @pid: pid to filter on when @scope is %HGSL_STAT_SCOPE_PID
+ * @devhandle: device handle to filter on when @scope is %HGSL_STAT_SCOPE_CONTEXT
+ * @context_id: context id to filter on when @scope is %HGSL_STAT_SCOPE_CONTEXT
+ * @detail: false = one summary line per context, true = full detail (default)
+ */
+struct hgsl_stat_query {
+	enum hgsl_stat_scope scope;
+	pid_t pid;
+	u32 devhandle;
+	u32 context_id;
+	bool detail;
+};
+
+/**
+ * struct hgsl_stat_state - sysfs "stat" query and cached snapshot
+ * @lock: protects @query and the cached snapshot
+ * @query: current query in effect for the sysfs "stat" attribute
+ * @snapshot: complete dump generated for @query
+ * @snapshot_size: valid byte count in @snapshot
+ */
+struct hgsl_stat_state {
+	struct mutex lock;
+	struct hgsl_stat_query query;
+	char *snapshot;
+	size_t snapshot_size;
+};
+
 struct qcom_hgsl {
 	struct device *dev;
 
@@ -313,6 +355,7 @@ struct qcom_hgsl {
 	struct kobject sysfs;
 	struct kobject *clients_sysfs;
 	struct dentry *debugfs;
+	struct hgsl_stat_state stat;
 	struct mutex destroying_ctx_list_lock;
 	struct list_head destroying_ctx_list;
 

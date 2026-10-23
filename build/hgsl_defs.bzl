@@ -53,6 +53,7 @@ _hgsl_git_version_h = rule(
 def hgsl_get_srcs():
     srcs = [
         "hgsl.c",
+        "hgsl_stat.c",
         "hgsl_gmugos.c",
         "hgsl_hyp.c",
         "hgsl_hyp_socket.c",

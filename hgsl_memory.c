@@ -356,10 +356,17 @@ out:
 
 static void hgsl_mem_free_actual(struct hgsl_mem_node *mem_node)
 {
-	if (mem_node->flags & GSL_MEMFLAGS_PROTECTED)
-		hgsl_unlock_pages(mem_node);
+	int ret = 0;
 
-	hgsl_free_pages(mem_node);
+	if (mem_node->flags & GSL_MEMFLAGS_PROTECTED)
+		ret = hgsl_unlock_pages(mem_node);
+
+	/* Hyp ownership transfer may not have completed; leak the pages instead of freeing. */
+	if (ret)
+		LOGE("Failed to unlock pages %d, leaking them", ret);
+	else
+		hgsl_free_pages(mem_node);
+
 	hgsl_free(mem_node->pages);
 	hgsl_mem_node_free(mem_node);
 }

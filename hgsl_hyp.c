@@ -1601,7 +1601,7 @@ int hgsl_hyp_mem_unmap_smmu(struct hgsl_hab_channel_t *hab_channel,
 			goto out;
 		}
 		if (rval != GSL_SUCCESS) {
-			LOGE("RPC_MEMORY_UNMAP_EXT_FD_PURE failed, %d", ret);
+			LOGE("RPC_MEMORY_UNMAP_EXT_FD_PURE failed, %d", rval);
 			ret = -EINVAL;
 			goto out;
 		}
@@ -1610,10 +1610,16 @@ int hgsl_hyp_mem_unmap_smmu(struct hgsl_hab_channel_t *hab_channel,
 		ret = habmm_unexport(hab_channel->socket,
 						mem_node->export_id, 0);
 		if (ret) {
-			LOGE("habmm_unexport failed, socket %d export_id %d",
+			/*
+			 * The gpuaddr is already released at this point, and HAB
+			 * owns its own dma_buf/fd reference until the remote side
+			 * unimports it, so it's safe to let mem_node be freed even
+			 * though the export handle teardown didn't complete.
+			 */
+			LOGW("habmm_unexport failed, socket %d export_id %d, ret %d",
 					hab_channel->socket,
-					mem_node->export_id);
-			goto out;
+					mem_node->export_id, ret);
+			ret = 0;
 		}
 	}
 

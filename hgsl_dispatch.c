@@ -4,7 +4,7 @@
  */
 
 #include "hgsl.h"
-#include "hgsl_debugfs.h"
+#include "hgsl_stat.h"
 #include "hgsl_dispatch.h"
 #include "hgsl_trace.h"
 
@@ -100,7 +100,7 @@ static void _warn_duplicate_ts(struct hgsl_priv *priv,
 		     drawobj_type_str(obj->type), obj->timestamp,
 		     (obj->type & CMDOBJ_TYPE) ? CMDOBJ(obj)->numibs : 0);
 	}
-	hgsl_debugfs_dump_ctxts(&ctxt, 1, priv->dev, false);
+	hgsl_stat_dump_ctxts(&ctxt, 1, priv->dev, false);
 }
 
 static bool _check_context_queue(struct hgsl_context *ctxt, u32 count)
@@ -322,16 +322,15 @@ static int _sendcmd(struct qcom_hgsl *hgsl,
  * Retires all expired marker and sync objs from the context
  * queue and returns one of the below
  * a) next drawobj that needs to be sent to ringbuffer
- * b) -EAGAIN for syncobj with syncpoints pending.
- * c) -EAGAIN for markerobj whose marker timestamp has not expired yet.
- * c) NULL for no commands remaining in drawq.
+ * b) NULL for syncobj with syncpoints pending — requeued when events complete
+ * c) NULL for markerobj whose marker timestamp has not expired yet
+ * d) NULL for no commands remaining in drawq.
  */
 static struct hgsl_drawobj *_process_drawqueue_get_next_drawobj(
 	struct qcom_hgsl *hgsl, struct hgsl_context *ctxt)
 {
 	struct hgsl_drawobj *drawobj;
-	u32 i = ctxt->drawq_head;
-	struct hgsl_drawobj_cmd *cmdobj;
+	u32 i;
 	int ret = 0;
 
 	if (ctxt->drawq_head == ctxt->drawq_tail)
@@ -347,11 +346,9 @@ static struct hgsl_drawobj *_process_drawqueue_get_next_drawobj(
 
 		switch (drawobj->type) {
 		case CMDOBJ_TYPE:
-			cmdobj = CMDOBJ(drawobj);
 			return drawobj;
 		case SYNCOBJ_TYPE:
-			ret = _retire_syncobj(hgsl, SYNCOBJ(drawobj), ctxt);
-			if (ret == 1)
+			if (_retire_syncobj(hgsl, SYNCOBJ(drawobj), ctxt) == 1)
 				return NULL;
 			break;
 		case MARKEROBJ_TYPE:
@@ -359,21 +356,32 @@ static struct hgsl_drawobj *_process_drawqueue_get_next_drawobj(
 			/* Special case where marker needs to be sent to GPU */
 			if (ret == 1)
 				return drawobj;
-			break;
-		case BINDOBJ_TYPE:
-			/* TODO: */
-			LOGW("BINDOBJ is not supported");
+			else if (ret < 0)
+				return NULL;
 			break;
 		case TIMELINEOBJ_TYPE:
-			ret = _retire_timelineobj(drawobj, ctxt);
+			/* Catch any future error path before it silently drops a signal. */
+			WARN_ON(_retire_timelineobj(drawobj, ctxt));
 			break;
+		case BINDOBJ_TYPE:
+			/* TODO: not yet supported; treat as unexpected for now */
+			fallthrough;
 		default:
-			ret = -EINVAL;
+			/*
+			 * Should never happen: all types are rejected in
+			 * hgsl_dispatch_queue_cmds() before reaching the drawq.
+			 * If memory corruption put something here, pop it to
+			 * unblock the queue.  Skip destroy — the pointer may not
+			 * be safe to dereference.
+			 */
+			WARN_ONCE(1,
+				"hgsl: ctx:[%u:%u] unexpected drawobj type %u in drawq\n",
+				ctxt->devhandle, ctxt->context_id,
+				drawobj->type);
+			hgsl_stat_dump_ctxts(&ctxt, 1, hgsl, true);
+			_pop_drawobj(ctxt);
 			break;
 		}
-
-		if (ret)
-			return ERR_PTR(ret);
 	}
 
 	return NULL;
@@ -636,7 +644,7 @@ static void _retire_drawobjs(struct hgsl_context *ctxt)
 
 		if (!hgsl_ts32_ge(ctxt->event_group.processed,
 				drawobj->timestamp))
-			continue;
+			break; /* list is ordered; nothing older remains */
 
 		hgsl_drawobj_destroy(drawobj);
 		list_del_init(&obj->node);
@@ -655,7 +663,7 @@ static void _warn_reclaim_pending(struct hgsl_context *ctxt)
 	     ctxt->context_id, ctxt->queued_ts,
 	     ctxt->event_group.processed,
 	     get_context_retired_ts(ctxt));
-	hgsl_debugfs_dump_ctxts(&ctxt, 1, dispatch->hgsl, false);
+	hgsl_stat_dump_ctxts(&ctxt, 1, dispatch->hgsl, false);
 }
 
 void hgsl_reclaim_drawobjs(struct hgsl_context *ctxt)
@@ -686,55 +694,80 @@ void hgsl_dispatch_ctxt_schedule(struct hgsl_context *ctxt)
 }
 
 /*
- * hgsl_dispatch_ctxt_issuecmds - Send pending commands for a context.
+ * _ctxt_drawq_blocked - check whether the head of the context's drawq
+ * cannot make forward progress right now.
  *
- * MUST only be called from hgsl_dispatch_ctxt_work(), which clears
- * dispatch->pending before acquiring the mutex.  Calling this function
- * from any other site would leave the pending flag set, causing
- * hgsl_dispatch_queue_context() in the -EAGAIN retry path to see
- * pending=1 and drop the new reference without scheduling, leaving
- * the context permanently stuck with no retry scheduled.
+ * Returns true (suppress dispatch) for:
+ *   empty drawq  – nothing to send.
+ *   SYNCOBJ      – still waiting on its fence(s).
+ *   MARKEROBJ    – not yet expired AND SKIP bit not set.
+ *                  SKIP markers must be sent to the GPU as NOPs to maintain
+ *                  timestamp ordering; they are never suppressed.
+ *
+ * Uses rt_mutex_trylock so it is safe from any context, including fence
+ * callbacks under fence->lock.  On trylock failure returns false so the
+ * caller proceeds optimistically; the next invocation will re-evaluate.
+ *
+ * The caller must already hold a reference to @ctxt (kref > 0).
  */
-static void hgsl_dispatch_ctxt_issuecmds(struct hgsl_context *ctxt)
+static bool _ctxt_drawq_blocked(struct hgsl_context *ctxt)
 {
-	struct hgsl_dispatch_context *dispatch = ctxt->dispatch;
-	struct qcom_hgsl *hgsl = dispatch->hgsl;
-	int ret;
+	struct hgsl_drawobj *head;
+	bool blocked = false;
 
-	ret = hgsl_dispatch_sendcmds(hgsl, ctxt);
-
-	/*
-	 * If the dispatch queue is full then requeue the job via the
-	 * standard queue path, which handles the pending flag and
-	 * reference counting.  Otherwise the context either successfully
-	 * submitted to the GPU or an unexpected error occurred.
-	 */
-	if (ret == -EINTR || ret == -EAGAIN)
-		hgsl_dispatch_queue_context(ctxt);
-	else if (ret < 0)
-		/* An unexpected error occurred, drop the job */
-		LOGE("sendcmds failed=%d", ret);
-
-	hgsl_put_context(ctxt);
+	if (!rt_mutex_trylock(&ctxt->drawq_lock))
+		return false;
+	head = (ctxt->drawq_head != ctxt->drawq_tail) ?
+		ctxt->drawq[ctxt->drawq_head] : NULL;
+	if (!head) {
+		rt_mutex_unlock(&ctxt->drawq_lock);
+		return true;
+	}
+	if (head->type == SYNCOBJ_TYPE &&
+	    hgsl_drawobj_events_pending(SYNCOBJ(head)))
+		blocked = true;
+	else if (head->type == MARKEROBJ_TYPE &&
+		 !_marker_expired(CMDOBJ(head)) &&
+		 !test_bit(CMDOBJ_SKIP, &CMDOBJ(head)->priv))
+		blocked = true;
+	rt_mutex_unlock(&ctxt->drawq_lock);
+	return blocked;
 }
 
+/*
+ * hgsl_dispatch_ctxt_work - kthread worker: retire completed drawobjs and
+ * dispatch pending commands for this context.
+ *
+ * dispatch->pending is cleared before acquiring the mutex so that concurrent
+ * callers can schedule a fresh work item while this one is running.
+ */
 static void hgsl_dispatch_ctxt_work(struct kthread_work *work)
 {
 	struct hgsl_dispatch_context *dispatch =
 			container_of(work, struct hgsl_dispatch_context, work);
 	struct hgsl_context *ctxt = dispatch->ctxt;
+	int ret;
 
-	/*
-	 * Clear the pending flag before acquiring the mutex so that
-	 * concurrent callers can schedule a fresh work item if new
-	 * commands arrive while we are waiting for or holding the lock.
-	 */
 	atomic_set(&dispatch->pending, 0);
 
 	rt_mutex_lock(&dispatch->mutex);
 	_retire_drawobjs(ctxt);
-	hgsl_dispatch_ctxt_issuecmds(ctxt);
+	ret = hgsl_dispatch_sendcmds(dispatch->hgsl, ctxt);
 	rt_mutex_unlock(&dispatch->mutex);
+
+	if (READ_ONCE(ctxt->queued) && likely(!READ_ONCE(ctxt->in_destroy))) {
+		/*
+		 * -EAGAIN/-EINTR have a natural ~500ms delay inside
+		 * _wait_for_qfree.  Rate-limit other errors similarly.
+		 */
+		if (ret < 0 && ret != -EAGAIN && ret != -EINTR) {
+			if (__ratelimit(&_dispatch_warn_rs))
+				LOGE("sendcmds failed=%d", ret);
+			msleep(100);
+		}
+		hgsl_dispatch_queue_context(ctxt);
+	}
+	hgsl_put_context(ctxt);
 }
 
 int hgsl_dispatch_queue_context(struct hgsl_context *ctxt)
@@ -746,12 +779,13 @@ int hgsl_dispatch_queue_context(struct hgsl_context *ctxt)
 
 	/*
 	 * Use dispatch->pending as a flag (0 = idle, 1 = scheduled).
-	 * If a work item is already pending, release the extra reference
-	 * immediately rather than accumulating it for the worker to drain.
+	 * If a work item is already pending, or the queue head cannot make
+	 * forward progress, release the extra reference immediately.
 	 * The pending work item will pick up any new draw objects that were
 	 * added to the queue before this call.
 	 */
-	if (atomic_cmpxchg(&dispatch->pending, 0, 1) != 0) {
+	if (_ctxt_drawq_blocked(ctxt) ||
+		atomic_cmpxchg(&dispatch->pending, 0, 1) != 0) {
 		hgsl_put_context(ctxt);
 		return 0;
 	}
